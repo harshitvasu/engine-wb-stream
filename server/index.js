@@ -144,7 +144,13 @@ app.post('/api/room/:roomId/reset', (req, res) => {
 // =========================================================================
 
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const remoteIp = req.socket?.remoteAddress;
+  const remotePort = req.socket?.remotePort;
+  if (remoteIp) {
+    console.log(`[WS] Connection established from ${remoteIp}:${remotePort}`);
+  }
+
   let session = null;
   let currentRoom = null;
 
@@ -273,8 +279,9 @@ app.use((req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`🚀 ExcaliStream server running on http://localhost:${PORT}`);
-  console.log(`📡 WebSocket endpoint at ws://localhost:${PORT}/ws`);
-  console.log(`📊 Observability metrics at http://localhost:${PORT}/api/stats`);
+const HOST = process.env.HOST || '0.0.0.0';
+server.listen(PORT, HOST, () => {
+  console.log(`🚀 ExcaliStream server running on http://${HOST}:${PORT}`);
+  console.log(`📡 WebSocket endpoint at ws://${HOST}:${PORT}/ws`);
+  console.log(`📊 Observability metrics at http://${HOST}:${PORT}/api/stats`);
 });

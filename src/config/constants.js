@@ -21,13 +21,21 @@ export const AUTOSAVE_OPTIONS = [1, 2, 3, 5];
 
 // Helper to determine WebSocket URL
 export function getWebSocketUrl() {
+  // 1. Explicit override via Vite environment variable (e.g. VITE_WS_URL=ws://51.21.14.17:3001/ws)
+  if (import.meta.env?.VITE_WS_URL) {
+    return import.meta.env.VITE_WS_URL;
+  }
+
   const loc = window.location;
-  if (loc.protocol === 'https:') {
-    return `wss://${loc.host}/ws`;
-  }
-  // In development, port 3001 hosts backend
+  const isSecure = loc.protocol === 'https:';
+  const protocol = isSecure ? 'wss:' : 'ws:';
+
+  // 2. In Vite development server (port 5173), route through Vite dev proxy
   if (loc.port === '5173') {
-    return `ws://${loc.hostname}:3001/ws`;
+    return `${protocol}//${loc.host}/ws`;
   }
-  return `ws://${loc.host}/ws`;
+
+  // 3. In production (served from remote IP, domain, or Express server)
+  //    Automatically resolves to ws://<IP>:<PORT>/ws without hardcoding
+  return `${protocol}//${loc.host}/ws`;
 }
