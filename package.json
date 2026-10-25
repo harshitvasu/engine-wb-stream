@@ -1,0 +1,31 @@
+{
+  "name": "lucid-lovelace",
+  "version": "1.0.0",
+  "description": "Fixed-ratio JSON Whiteboard Streaming App with Excalidraw",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n \"SERVER,VITE\" -c \"blue,green\" \"node server/index.js\" \"vite\"",
+    "server": "node server/index.js",
+    "client": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "postinstall": "node scripts/copy-excalidraw-assets.js",
+    "test": "node test/streamTest.js && node test/optimizationTests.js && node test/streamControlsTest.js",
+    "test:benchmark": "node test/loadBenchmark.js"
+  },
+  "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.1",
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "lucide-react": "^1.61.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "^9.1.2",
+    "vite": "^8.3.5"
+  }
+}
