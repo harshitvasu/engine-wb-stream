@@ -232,6 +232,14 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'video_rotation': {
+          if (!currentRoom) currentRoom = getOrCreateRoom(message.roomId || 'default');
+          if (typeof message.videoRotation === 'number') {
+            currentRoom.setVideoRotation(message.videoRotation);
+          }
+          break;
+        }
+
         case 'clear': {
           if (currentRoom) {
             currentRoom.clear();

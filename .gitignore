@@ -49,3 +49,5 @@ ehthumbs.db
 # Excalidraw vendor assets (copied automatically on npm install via postinstall)
 public/fonts/
 public/locales/
+
+webrtc-sfu/target/*

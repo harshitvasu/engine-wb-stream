@@ -18,6 +18,7 @@ export class RoomState {
       height: 900,
     };
     this.revision = 0;
+    this.videoRotation = 0; // Broadcaster video orientation angle in degrees (0, 90, 180, 270)
     this.lastAutosave = Date.now();
     this.createdAt = Date.now();
 
@@ -81,12 +82,35 @@ export class RoomState {
       revision: this.revision,
       elements: Array.from(this.elementsMap.values()),
       appState: this.appState,
+      videoRotation: this.videoRotation,
       timestamp: Date.now(),
       stats: {
         viewersCount: this.viewers.size,
         broadcastersCount: this.broadcaster ? 1 : 0,
       },
     };
+  }
+
+  /**
+   * Updates broadcaster video rotation and broadcasts the new orientation to all viewers.
+   */
+  setVideoRotation(rotation) {
+    this.videoRotation = ((rotation % 360) + 360) % 360;
+    const msg = {
+      type: 'video_rotation',
+      roomId: this.id,
+      videoRotation: this.videoRotation,
+      timestamp: Date.now(),
+    };
+    const raw = JSON.stringify(msg);
+    const bytes = Buffer.byteLength(raw, 'utf8');
+
+    for (const viewer of this.viewers.values()) {
+      const ok = viewer.enqueue(msg, raw, DeliveryClass.RELIABLE);
+      if (ok) {
+        this.stats.bytesEgress += bytes;
+      }
+    }
   }
 
   /**

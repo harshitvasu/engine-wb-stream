@@ -25,6 +25,8 @@ html, body, #root {
   width: 100%;
   height: 100%;
   overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", Helvetica, Arial, sans-serif;
   background-color: var(--bg-page);
   color: var(--text-main);
@@ -1284,12 +1286,12 @@ html, body, #root {
 }
 
 /* ==========================================================================
-   STREAM FULLSCREEN & RESPONSIVE AUTO-SCALING STYLES
+   STREAM & WRITE FULLSCREEN & RESPONSIVE AUTO-SCALING STYLES
    ========================================================================== */
 .page-layout.stream-fullscreen,
+.page-layout.write-fullscreen,
 .page-layout:fullscreen,
 .page-layout:-webkit-full-screen {
-  background-color: #0b0f19 !important;
   position: fixed !important;
   inset: 0 !important;
   width: 100vw !important;
@@ -1297,16 +1299,63 @@ html, body, #root {
   z-index: 99999 !important;
 }
 
+/* Stream Fullscreen: Pure white background as requested */
+.page-layout.stream-fullscreen,
+.page-layout.stream-fullscreen:fullscreen,
+.page-layout.stream-fullscreen:-webkit-full-screen {
+  background-color: #ffffff !important;
+}
+
 .page-layout.stream-fullscreen .canvas-viewport-wrapper,
+.page-layout.stream-fullscreen .stream-fullscreen-viewport,
+.page-layout.stream-fullscreen .canvas-outer-wrapper {
+  background-color: #ffffff !important;
+}
+
+/* Write Fullscreen: Dark framing backdrop */
+.page-layout.write-fullscreen,
+.page-layout.write-fullscreen:fullscreen,
+.page-layout.write-fullscreen:-webkit-full-screen {
+  background-color: #0b0f19 !important;
+}
+
+.page-layout.write-fullscreen .canvas-viewport-wrapper {
+  background-color: #0b0f19 !important;
+}
+
+/* Hide TopToolbar in fullscreen mode */
+.page-layout.stream-fullscreen .app-top-toolbar,
+.page-layout.write-fullscreen .app-top-toolbar {
+  display: none !important;
+}
+
+/* Presenter cam visible with higher z-index in both write and stream fullscreen modes (R3) */
+.page-layout.stream-fullscreen .floating-media-card,
+.page-layout.write-fullscreen .floating-media-card {
+  display: flex !important;
+  z-index: 100010 !important;
+  pointer-events: auto !important;
+}
+
+.page-layout.stream-fullscreen .canvas-viewport-wrapper,
+.page-layout.write-fullscreen .canvas-viewport-wrapper,
 .page-layout:fullscreen .canvas-viewport-wrapper,
 .page-layout:-webkit-full-screen .canvas-viewport-wrapper {
   padding: 0 !important;
   width: 100vw !important;
   height: 100vh !important;
+}
+
+.page-layout.stream-fullscreen .canvas-viewport-wrapper {
+  background-color: #ffffff !important;
+}
+
+.page-layout.write-fullscreen .canvas-viewport-wrapper {
   background-color: #0b0f19 !important;
 }
 
 .page-layout.stream-fullscreen .canvas-outer-wrapper,
+.page-layout.write-fullscreen .canvas-outer-wrapper,
 .page-layout:fullscreen .canvas-outer-wrapper,
 .page-layout:-webkit-full-screen .canvas-outer-wrapper {
   max-width: min(100vw, calc(100vh * 16 / 9)) !important;
@@ -1314,6 +1363,112 @@ html, body, #root {
   border-radius: 0 !important;
   border: none !important;
   box-shadow: none !important;
+}
+
+/* Prevent swipe down/bounce gestures from exiting or interfering with fullscreen */
+.page-layout.write-fullscreen {
+  overscroll-behavior: none !important;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.page-layout.write-fullscreen .canvas-viewport-wrapper,
+.page-layout.write-fullscreen .canvas-outer-wrapper,
+.page-layout.write-fullscreen .excalidraw-container,
+.page-layout.write-fullscreen .excalidraw {
+  overscroll-behavior: none !important;
+}
+
+
+
+/* ==========================================================================
+   Excalidraw App-menu_top__left & Action Buttons (Pause, Clear, Fullscreen) Styles
+   ========================================================================== */
+.excalidraw .App-menu_top__left {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: wrap !important;
+  align-items: flex-start !important;
+  gap: 8px !important;
+}
+
+.excalidraw .App-menu_top__left > .selected-shape-actions,
+.excalidraw .App-menu_top__left > [class*="selected-shape-actions"],
+.excalidraw .App-menu_top__left > section {
+  flex-basis: 100% !important;
+  width: 100% !important;
+}
+
+.excalidraw-actions-island,
+.excalidraw-fullscreen-island {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 4px !important;
+  pointer-events: auto !important;
+  box-shadow: var(--shadow-island, 0 1px 4px rgba(0, 0, 0, 0.15)) !important;
+  border-radius: var(--border-radius-lg, 8px) !important;
+  background-color: var(--island-bg-color, #ffffff) !important;
+  padding: 0 !important;
+}
+
+.excalidraw .excalidraw-action-btn,
+.excalidraw .excalidraw-fullscreen-button {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: var(--default-button-size, 36px) !important;
+  height: var(--default-button-size, 36px) !important;
+  padding: 0 !important;
+  border-radius: var(--border-radius-lg, 8px) !important;
+  background-color: var(--island-bg-color, #ffffff) !important;
+  border: 1px solid var(--color-gray-20, #e2e8f0) !important;
+  color: var(--icon-fill-color, #1e293b) !important;
+  cursor: pointer !important;
+  transition: all 0.15s ease !important;
+  pointer-events: auto !important;
+}
+
+.excalidraw .excalidraw-action-btn:hover,
+.excalidraw .excalidraw-fullscreen-button:hover {
+  background-color: var(--button-hover-bg, #f1f5f9) !important;
+  color: #0f172a !important;
+}
+
+/* Menu button when Excalidraw menu is active / open */
+.excalidraw .excalidraw-action-btn.excalidraw-menu-btn.active {
+  background-color: #0f172a !important;
+  border-color: #0f172a !important;
+  color: #ffffff !important;
+}
+
+/* Pause button when live streaming is paused */
+.excalidraw .excalidraw-action-btn.excalidraw-pause-btn.paused {
+  background-color: #fef3c7 !important;
+  border-color: #f59e0b !important;
+  color: #b45309 !important;
+}
+
+.excalidraw .excalidraw-action-btn.excalidraw-pause-btn.paused:hover {
+  background-color: #fde68a !important;
+  color: #92400e !important;
+}
+
+/* Clear canvas button hover */
+.excalidraw .excalidraw-action-btn.excalidraw-clear-btn:hover {
+  background-color: #fee2e2 !important;
+  border-color: #fca5a5 !important;
+  color: #dc2626 !important;
+}
+
+/* Fullscreen button when active */
+.excalidraw .excalidraw-action-btn.excalidraw-fullscreen-button.active,
+.excalidraw .excalidraw-fullscreen-button.active {
+  background-color: #0f172a !important;
+  border-color: #0f172a !important;
+  color: #ffffff !important;
 }
 
 .floating-exit-fullscreen-btn {
@@ -1404,3 +1559,328 @@ html, body, #root {
     display: none;
   }
 }
+
+/* =========================================================================
+   FLOATING WEBRTC VIDEO & AUDIO THUMBNAIL CARD
+   ========================================================================= */
+
+.floating-media-card {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 250px;
+  background: #1e293b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.2);
+  z-index: 1050;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  color: #f8fafc;
+  font-family: inherit;
+  backdrop-filter: blur(8px);
+}
+
+.floating-media-card.minimized {
+  width: auto;
+  min-width: 170px;
+}
+
+.media-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: rgba(15, 23, 42, 0.8);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.media-card-title-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.status-dot.live {
+  background: #10b981;
+  box-shadow: 0 0 6px #10b981;
+}
+
+.status-dot.offline {
+  background: #f43f5e;
+}
+
+.media-card-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #cbd5e1;
+  letter-spacing: -0.01em;
+}
+
+.media-tag {
+  font-size: 8px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+}
+
+.media-tag.live {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+}
+
+.media-tag.connecting {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+}
+
+.media-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.media-card-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  padding: 3px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.media-card-btn:hover {
+  color: #f8fafc;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.media-card-body {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.video-viewport {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #090d16;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.video-element {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.video-element.video-invisible {
+  opacity: 0 !important;
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  pointer-events: none !important;
+}
+
+.video-element.hidden-video {
+  display: none;
+}
+
+.video-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #64748b;
+}
+
+.placeholder-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.placeholder-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: #94a3b8;
+}
+
+.video-overlay-badges {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  display: flex;
+  gap: 4px;
+}
+
+.overlay-badge {
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  padding: 3px 5px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.media-card-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.ctrl-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: #e2e8f0;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ctrl-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.ctrl-btn.muted,
+.ctrl-btn.off {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.3);
+  color: #f87171;
+}
+
+.ctrl-btn.rotate-btn:hover {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #60a5fa;
+}
+
+.media-card-btn.rotate-btn {
+  transition: transform 0.2s ease, color 0.15s ease;
+}
+
+.media-card-btn.rotate-btn:hover {
+  color: #60a5fa;
+  transform: rotate(90deg);
+}
+
+.volume-slider {
+  width: 70px;
+  accent-color: #3b82f6;
+  height: 4px;
+  cursor: pointer;
+}
+
+.media-error-badge {
+  font-size: 10px;
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.15);
+  padding: 4px 6px;
+  border-radius: 4px;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.error-retry-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #f8fafc;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 2px 5px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.error-retry-link:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.media-tag.test {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.ctrl-btn.hardware-btn {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #93c5fd;
+}
+
+.ctrl-btn.hardware-btn:hover {
+  background: rgba(59, 130, 246, 0.35);
+}
+
+.autoplay-unblock-banner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid #10b981;
+  border-radius: 6px;
+  color: #f8fafc;
+  font-size: 11px;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.autoplay-unblock-banner:hover {
+  background: #10b981;
+  color: #0f172a;
+}
+
+

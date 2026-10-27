@@ -1,7 +1,8 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef } from 'react';
 import { Excalidraw } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
 import { WhiteboardFrame } from './WhiteboardFrame';
+import { ExcalidrawFullscreenButton } from './ExcalidrawFullscreenButton';
 import { getSavedWhiteboardData } from '../hooks/useWhiteboardStreamer';
 
 /**
@@ -16,7 +17,15 @@ export const WhiteboardCanvas = React.memo(function WhiteboardCanvas({
   onPointerUp,
   zoom = 1.0,
   isExcalidrawMenuVisible = false,
+  onToggleExcalidrawMenu,
+  isFullscreen = false,
+  onToggleFullscreen,
+  isStreamingPaused = false,
+  onToggleStreamingPause,
+  onClearCanvas,
 }) {
+  const canvasWrapperRef = useRef(null);
+
   // Load saved state once on initial mount for instant refresh-proofing
   const initialData = useMemo(() => {
     return getSavedWhiteboardData();
@@ -24,7 +33,12 @@ export const WhiteboardCanvas = React.memo(function WhiteboardCanvas({
 
   return (
     <main
-      className={`canvas-viewport-wrapper ${isExcalidrawMenuVisible ? 'excalidraw-menu-visible' : 'excalidraw-menu-hidden'}`}
+      ref={canvasWrapperRef}
+      className={`canvas-viewport-wrapper ${
+        isExcalidrawMenuVisible
+          ? 'excalidraw-menu-visible'
+          : 'excalidraw-menu-hidden'
+      } ${isFullscreen ? 'write-fullscreen-viewport' : ''}`}
       onPointerDown={onPointerDown}
       onPointerUp={onPointerUp}
       onTouchStart={onPointerDown}
@@ -50,6 +64,18 @@ export const WhiteboardCanvas = React.memo(function WhiteboardCanvas({
           }}
         />
       </WhiteboardFrame>
+
+      {/* Action buttons (Menu, Pause/Resume, Clear, Fullscreen) rendered next to App-menu_top__left inside Excalidraw */}
+      <ExcalidrawFullscreenButton
+        isFullscreen={isFullscreen}
+        onToggleFullscreen={onToggleFullscreen}
+        isStreamingPaused={isStreamingPaused}
+        onToggleStreamingPause={onToggleStreamingPause}
+        onClearCanvas={onClearCanvas}
+        isExcalidrawMenuVisible={isExcalidrawMenuVisible}
+        onToggleExcalidrawMenu={onToggleExcalidrawMenu}
+        containerRef={canvasWrapperRef}
+      />
     </main>
   );
 });

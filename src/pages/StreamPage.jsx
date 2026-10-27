@@ -5,7 +5,9 @@ import { Sliders, Minimize2 } from 'lucide-react';
 import { TopToolbar } from '../components/TopToolbar';
 import { WhiteboardFrame } from '../components/WhiteboardFrame';
 import { StreamControlsPanel } from '../components/StreamControlsPanel';
+import { PublisherVideoThumbnail } from '../components/PublisherVideoThumbnail';
 import { useWhiteboardViewer } from '../hooks/useWhiteboardViewer';
+import { useWebRTCViewer } from '../hooks/useWebRTCViewer';
 import { MIN_VIEWER_ZOOM } from '../config/constants';
 
 // Memoized Viewer Canvas to completely isolate Excalidraw from toolbar telemetry updates
@@ -54,8 +56,22 @@ export function StreamPage() {
     resetControlsToDefaults,
   } = useWhiteboardViewer({ roomId: 'default' });
 
+  const {
+    remoteStream,
+    isRtcConnected,
+    hasAudioTrack,
+    hasVideoTrack,
+    isAudioMuted,
+    volume,
+    rtcError,
+    toggleAudioMute,
+    setVolume,
+    requestKeyframe,
+  } = useWebRTCViewer({ roomId: 'default' });
+
   const [isControlsOpen, setIsControlsOpen] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  // Default load in fullscreen mode as requested (R2)
+  const [isFullscreen, setIsFullscreen] = useState(true);
   const containerRef = useRef(null);
 
   const toggleControls = useCallback(() => {
@@ -64,6 +80,7 @@ export function StreamPage() {
 
   // Listen to native fullscreen changes (via Esc, browser UI, or API)
   useEffect(() => {
+    let hadNativeFs = false;
     const handleFsChange = () => {
       const isNativeFs = !!(
         document.fullscreenElement ||
@@ -71,7 +88,13 @@ export function StreamPage() {
         document.mozFullScreenElement ||
         document.msFullscreenElement
       );
-      setIsFullscreen(isNativeFs);
+      if (isNativeFs) {
+        hadNativeFs = true;
+        setIsFullscreen(true);
+      } else if (hadNativeFs) {
+        hadNativeFs = false;
+        setIsFullscreen(false);
+      }
     };
 
     document.addEventListener('fullscreenchange', handleFsChange);
@@ -86,6 +109,14 @@ export function StreamPage() {
       document.removeEventListener('MSFullscreenChange', handleFsChange);
     };
   }, []);
+
+  // Trigger canvas resize recalculation when entering / exiting fullscreen or on initial mount
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      window.dispatchEvent(new Event('resize'));
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [isFullscreen]);
 
   const toggleFullscreen = useCallback(() => {
     const el = containerRef.current;
@@ -192,6 +223,20 @@ export function StreamPage() {
         </button>
       )}
 
+      {/* Floating WebRTC Viewer Audio/Video Thumbnail */}
+      <PublisherVideoThumbnail
+        stream={remoteStream}
+        isPublisher={false}
+        isConnected={isRtcConnected}
+        hasAudioTrack={hasAudioTrack}
+        hasVideoTrack={hasVideoTrack}
+        isAudioMuted={isAudioMuted}
+        onToggleAudioMute={toggleAudioMute}
+        volume={volume}
+        onVolumeChange={setVolume}
+        onRequestKeyframe={requestKeyframe}
+        error={rtcError}
+      />
     </div>
   );
 }

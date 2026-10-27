@@ -41,3 +41,27 @@ export function getWebSocketUrl() {
   //    Automatically resolves to ws://<IP>:<PORT>/ws without hardcoding
   return `${protocol}//${loc.host}/ws`;
 }
+
+// Helper to determine Rust WebRTC SFU Signaling WebSocket URL
+export function getSfuWebSocketUrl() {
+  if (import.meta.env?.VITE_SFU_WS_URL) {
+    return import.meta.env.VITE_SFU_WS_URL;
+  }
+
+  const loc = window.location;
+  const isSecure = loc.protocol === 'https:';
+  const protocol = isSecure ? 'wss:' : 'ws:';
+
+  // 1. In Vite development server (port 5173) or whenever page is loaded over HTTPS:
+  // Route through Vite's dev proxy `/rtc-ws`.
+  // When HTTPS is enabled (e.g. with @vitejs/plugin-basic-ssl for mobile camera permissions),
+  // Vite terminates SSL/TLS on port 5173 and proxies plain WebSockets to the Rust SFU on port 3088.
+  // This avoids TLS handshake errors (httparse invalid token) on the SFU and prevents Mixed Content blocks in browsers.
+  if (loc.port === '5173' || isSecure) {
+    return `${protocol}//${loc.host}/rtc-ws`;
+  }
+
+  // 2. Direct connection on plain HTTP in production:
+  const sfuPort = import.meta.env?.VITE_SFU_PORT || 3088;
+  return `ws://${loc.hostname}:${sfuPort}`;
+}

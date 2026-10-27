@@ -21,7 +21,6 @@ import {
   Layers,
   Sparkles,
   Sliders,
-  Menu,
   Scan,
   ChevronDown,
   ChevronUp,
@@ -41,8 +40,6 @@ export function TopToolbar({
   isFullscreen = false,
   onToggleControls,
   isControlsOpen = false,
-  onToggleExcalidrawMenu,
-  isExcalidrawMenuVisible = false,
   // Telemetry Visibility Controls
   isTelemetryVisible: externalIsTelemetryVisible,
   onToggleTelemetry: externalOnToggleTelemetry,
@@ -120,18 +117,6 @@ export function TopToolbar({
           <div className="ratio-indicator">
             <span>16:9</span>
           </div>
-
-          {onToggleExcalidrawMenu && (
-            <button
-              type="button"
-              onClick={onToggleExcalidrawMenu}
-              className={`excalidraw-menu-toggle ${isExcalidrawMenuVisible ? 'active' : ''}`}
-              title={isExcalidrawMenuVisible ? 'Hide Excalidraw Menu' : 'Show Excalidraw Menu'}
-            >
-              <Menu size={12} />
-              <span>Menu</span>
-            </button>
-          )}
         </div>
 
         {/* 2. Center Section: Selectors Only */}
@@ -241,35 +226,7 @@ export function TopToolbar({
 
         {/* 3. Right Section: Actions & Connection Badge */}
         <div className="toolbar-section toolbar-right">
-          {!isStream ? (
-            <>
-              {setIsStreamingPaused && (
-                <button
-                  type="button"
-                  onClick={() => setIsStreamingPaused(!isStreamingPaused)}
-                  className={`action-btn-sm ${isStreamingPaused ? 'paused' : ''}`}
-                  title={isStreamingPaused ? 'Resume live streaming' : 'Pause live streaming'}
-                >
-                  {isStreamingPaused ? <Play size={12} /> : <Pause size={12} />}
-                  <span>{isStreamingPaused ? 'Resume' : 'Pause'}</span>
-                </button>
-              )}
-
-              {clearCanvas && (
-                <button
-                  type="button"
-                  onClick={clearCanvas}
-                  className="action-btn-sm clear-btn"
-                  title="Clear canvas"
-                >
-                  <Trash2 size={12} />
-                  <span>Clear</span>
-                </button>
-              )}
-
-              <span className="toolbar-divider" />
-            </>
-          ) : (
+          {isStream && (
             <>
               {onFitToScreen && (
                 <button

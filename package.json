@@ -5,12 +5,19 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -n \"SERVER,VITE\" -c \"blue,green\" \"node server/index.js\" \"vite\"",
+    "dev:all": "concurrently -n \"SERVER,SFU,VITE\" -c \"blue,magenta,green\" \"node server/index.js\" \"./webrtc-sfu/target/release/webrtc-sfu\" \"vite\"",
     "server": "node server/index.js",
+    "sfu": "./webrtc-sfu/target/release/webrtc-sfu",
+    "sfu:build": "PATH=\"$HOME/.cargo/bin:$PATH\" cargo build --release --manifest-path webrtc-sfu/Cargo.toml",
+    "sfu:dev": "PATH=\"$HOME/.cargo/bin:$PATH\" cargo run --manifest-path webrtc-sfu/Cargo.toml",
     "client": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "postinstall": "node scripts/copy-excalidraw-assets.js",
     "test": "node test/streamTest.js && node test/optimizationTests.js && node test/streamControlsTest.js",
+    "test:integration": "node test/webrtcIntegrationTest.js",
+    "test:sfu": "PATH=\"$HOME/.cargo/bin:$PATH\" cargo test --manifest-path webrtc-sfu/Cargo.toml --test e2e_connection_test -- --nocapture",
+    "test:all": "npm test && npm run test:integration && npm run test:sfu",
     "test:scale": "node test/responsiveScaleTest.js",
     "test:benchmark": "node test/loadBenchmark.js"
   },
@@ -25,6 +32,7 @@
     "ws": "^8.22.0"
   },
   "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "concurrently": "^9.1.2",
     "vite": "^8.3.5"

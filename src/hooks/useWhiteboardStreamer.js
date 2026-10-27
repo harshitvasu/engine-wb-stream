@@ -481,6 +481,19 @@ export function useWhiteboardStreamer({ roomId = 'default', initialBatchInterval
     }
   }, [roomId]);
 
+  const broadcastVideoRotation = useCallback((rotation) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'video_rotation',
+          roomId,
+          videoRotation: rotation,
+          timestamp: Date.now(),
+        })
+      );
+    }
+  }, [roomId]);
+
   return {
     excalidrawAPI,
     setExcalidrawAPI,
@@ -497,6 +510,7 @@ export function useWhiteboardStreamer({ roomId = 'default', initialBatchInterval
     zoomIn,
     resetZoom,
     clearCanvas,
+    broadcastVideoRotation,
     metrics,
     handleExcalidrawChange,
     handlePointerDown,

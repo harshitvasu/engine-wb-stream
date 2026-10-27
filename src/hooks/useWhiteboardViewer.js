@@ -20,6 +20,7 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
   const [isConnected, setIsConnected] = useState(false);
   const [broadcasterOnline, setBroadcasterOnline] = useState(false);
   const [streamError, setStreamError] = useState(null);
+  const [videoRotation, setVideoRotation] = useState(0);
 
   // Stream controls state with persistence
   const [controls, setControlsState] = useState(() => getSavedStreamControls());
@@ -626,6 +627,18 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
           return;
         }
 
+        // Live broadcaster video orientation updates
+        if (msg.type === 'video_rotation') {
+          if (typeof msg.videoRotation === 'number') {
+            setVideoRotation(msg.videoRotation);
+          }
+          return;
+        }
+
+        if ((msg.type === 'init' || msg.type === 'snapshot') && typeof msg.videoRotation === 'number') {
+          setVideoRotation(msg.videoRotation);
+        }
+
         // Telemetry counters
         incomingEventsCounterRef.current += 1;
         incomingBytesCounterRef.current += byteSize;
@@ -641,18 +654,15 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
 
           if (result && api) {
             if (result.type === 'clear') {
-              const scaled = computeScaledSceneAppState(
-                lastBroadcasterAppStateRef.current || { zoom: { value: 1.0 }, scrollX: 0, scrollY: 0 }
-              );
               api.updateScene({
                 elements: [],
                 commitToHistory: false,
                 appState: {
                   viewModeEnabled: true,
                   zenModeEnabled: true,
-                  zoom: scaled?.zoom || { value: MIN_VIEWER_ZOOM },
-                  scrollX: scaled?.scrollX || 0,
-                  scrollY: scaled?.scrollY || 0,
+                  zoom: { value: MIN_ZOOM },
+                  scrollX: 0,
+                  scrollY: 0,
                 },
               });
             } else {
@@ -665,19 +675,12 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
                 },
               };
               if (result.appState) {
-                lastBroadcasterAppStateRef.current = {
-                  ...lastBroadcasterAppStateRef.current,
-                  ...result.appState,
-                };
                 if (result.appState.viewBackgroundColor && result.type === 'snapshot') {
                   sceneUpdate.appState.viewBackgroundColor = result.appState.viewBackgroundColor;
                 }
-              }
-              const scaled = computeScaledSceneAppState(lastBroadcasterAppStateRef.current);
-              if (scaled) {
-                sceneUpdate.appState.zoom = scaled.zoom;
-                sceneUpdate.appState.scrollX = scaled.scrollX;
-                sceneUpdate.appState.scrollY = scaled.scrollY;
+                if (result.appState.zoom) sceneUpdate.appState.zoom = result.appState.zoom;
+                if (result.appState.scrollX !== undefined) sceneUpdate.appState.scrollX = result.appState.scrollX;
+                if (result.appState.scrollY !== undefined) sceneUpdate.appState.scrollY = result.appState.scrollY;
               }
               api.updateScene(sceneUpdate);
             }
@@ -848,51 +851,6 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
     };
   }, [connect]);
 
-  // Responsive scale update when viewer window resizes or device orientation changes
-  useEffect(() => {
-    const handleResize = () => {
-      const api = excalidrawAPIRef.current;
-      if (!api) return;
-
-      const baseState = lastBroadcasterAppStateRef.current || {
-        zoom: { value: 1.0 },
-        scrollX: 0,
-        scrollY: 0,
-        width: FIXED_CANVAS_WIDTH,
-        height: FIXED_CANVAS_HEIGHT,
-      };
-      const scaled = computeScaledSceneAppState(baseState);
-      if (scaled) {
-        api.updateScene({
-          appState: {
-            zoom: scaled.zoom,
-            scrollX: scaled.scrollX,
-            scrollY: scaled.scrollY,
-          },
-        });
-      }
-    };
-
-    window.addEventListener('resize', handleResize);
-    window.addEventListener('orientationchange', handleResize);
-
-    let ro = null;
-    const el = document.querySelector('.fixed-aspect-container') ||
-               document.querySelector('.canvas-outer-wrapper');
-    if (el && typeof ResizeObserver !== 'undefined') {
-      ro = new ResizeObserver(() => {
-        handleResize();
-      });
-      ro.observe(el);
-    }
-
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      window.removeEventListener('orientationchange', handleResize);
-      if (ro) ro.disconnect();
-    };
-  }, [computeScaledSceneAppState]);
-
   // Explicit retry connection handler
   const retryConnection = useCallback(() => {
     clearTimeout(reconnectTimeoutRef.current);
@@ -913,7 +871,7 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
     metrics,
     streamError,
     retryConnection,
-    fitToScreen,
+    videoRotation,
     // Stream Controls
     controls,
     updateControl,
