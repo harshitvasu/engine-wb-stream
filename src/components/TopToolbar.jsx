@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useCallback } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   Radio,
@@ -22,6 +22,9 @@ import {
   Sparkles,
   Sliders,
   Menu,
+  Scan,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { MIN_ZOOM, NETWORK_BATCH_INTERVALS, AUTOSAVE_OPTIONS } from '../config/constants';
 
@@ -32,12 +35,18 @@ export function TopToolbar({
   onZoomIn,
   onResetZoom,
   isStream = false,
+  onFitToScreen,
   onExportJson,
   onToggleFullscreen,
+  isFullscreen = false,
   onToggleControls,
   isControlsOpen = false,
   onToggleExcalidrawMenu,
   isExcalidrawMenuVisible = false,
+  // Telemetry Visibility Controls
+  isTelemetryVisible: externalIsTelemetryVisible,
+  onToggleTelemetry: externalOnToggleTelemetry,
+  defaultTelemetryVisible = true,
   // Stream Parameters (for Write page)
   batchIntervalMs = 16,
   setBatchIntervalMs,
@@ -50,6 +59,33 @@ export function TopToolbar({
   metrics = {},
   broadcasterOnline = true,
 }) {
+  // Internal state for toggling telemetry visibility with localStorage persistence
+  const [internalIsTelemetryVisible, setInternalIsTelemetryVisible] = useState(() => {
+    try {
+      const saved = localStorage.getItem('excalistream_telemetry_visible');
+      return saved !== null ? JSON.parse(saved) : defaultTelemetryVisible;
+    } catch {
+      return defaultTelemetryVisible;
+    }
+  });
+
+  const isTelemetryVisible = externalIsTelemetryVisible !== undefined
+    ? externalIsTelemetryVisible
+    : internalIsTelemetryVisible;
+
+  const handleToggleTelemetry = useCallback(() => {
+    if (externalOnToggleTelemetry) {
+      externalOnToggleTelemetry();
+    } else {
+      setInternalIsTelemetryVisible((prev) => {
+        const next = !prev;
+        try {
+          localStorage.setItem('excalistream_telemetry_visible', JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    }
+  }, [externalOnToggleTelemetry]);
   return (
     <header className="app-top-toolbar unified-toolbar">
       {/* =========================================================================
@@ -197,7 +233,7 @@ export function TopToolbar({
             <div className="center-selectors-cluster">
               <div className="telemetry-pill-compact" title="Synchronized with presenter zoom, pan, and strokes in real-time">
                 <Eye size={12} className="text-blue-600" />
-                <span>Follow Presenter</span>
+                <span className="stream-sync-label">Follow Presenter</span>
               </div>
             </div>
           )}
@@ -235,6 +271,17 @@ export function TopToolbar({
             </>
           ) : (
             <>
+              {onFitToScreen && (
+                <button
+                  type="button"
+                  onClick={onFitToScreen}
+                  className="tool-btn-sm fit-screen-btn"
+                  title="Fit whiteboard content to screen"
+                >
+                  <Scan size={12} />
+                  <span className="btn-label-responsive">Fit</span>
+                </button>
+              )}
               {onToggleControls && (
                 <button
                   type="button"
@@ -243,7 +290,7 @@ export function TopToolbar({
                   title={isControlsOpen ? 'Collapse Stream Controls' : 'Open Stream Controls'}
                 >
                   <Sliders size={12} />
-                  <span>Controls</span>
+                  <span className="btn-label-responsive">Controls</span>
                   {metrics.isAutoThrottlingActive && (
                     <span className="control-pulse-dot" title="Auto-throttling active" />
                   )}
@@ -257,15 +304,15 @@ export function TopToolbar({
                   title="Download current whiteboard snapshot as JSON"
                 >
                   <Download size={12} />
-                  <span>Export JSON</span>
+                  <span className="btn-label-responsive">Export JSON</span>
                 </button>
               )}
               {onToggleFullscreen && (
                 <button
                   type="button"
                   onClick={onToggleFullscreen}
-                  className="tool-btn-sm icon-only"
-                  title="Toggle Fullscreen"
+                  className={`tool-btn-sm icon-only ${isFullscreen ? 'active' : ''}`}
+                  title={isFullscreen ? 'Exit Fullscreen' : 'Toggle Fullscreen'}
                 >
                   <Maximize2 size={13} />
                 </button>
@@ -273,6 +320,22 @@ export function TopToolbar({
               <span className="toolbar-divider" />
             </>
           )}
+
+          {/* Telemetry Row Visibility Toggle Button */}
+          <button
+            type="button"
+            onClick={handleToggleTelemetry}
+            className={`tool-btn-sm telemetry-toggle-btn ${isTelemetryVisible ? 'active' : ''}`}
+            title={isTelemetryVisible ? 'Hide telemetry metrics row' : 'Show telemetry metrics row'}
+            aria-label={isTelemetryVisible ? 'Hide telemetry metrics' : 'Show telemetry metrics'}
+            aria-expanded={isTelemetryVisible}
+          >
+            <Activity size={12} className={isTelemetryVisible ? 'text-blue-600' : 'text-slate-400'} />
+            <span className="btn-label-responsive">Telemetry</span>
+            <span className="telemetry-chevron">
+              {isTelemetryVisible ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+            </span>
+          </button>
 
           {/* Connection Status Badge */}
           <div className="status-indicator">
@@ -311,104 +374,106 @@ export function TopToolbar({
       </div>
 
       {/* =========================================================================
-          LINE 2: DEDICATED TELEMETRY STATUS ROW
+          LINE 2: DEDICATED TELEMETRY STATUS ROW (Collapsible)
           ========================================================================= */}
-      <div className="toolbar-row-telemetry">
-        {!isStream ? (
-          <div className="telemetry-track">
-            <div className="telemetry-pill-compact" title="Local Rendering Latency">
-              <Zap size={11} className="text-amber-500" />
-              <span>Local GPU: <strong>0ms</strong></span>
+      {isTelemetryVisible && (
+        <div className="toolbar-row-telemetry">
+          {!isStream ? (
+            <div className="telemetry-track">
+              <div className="telemetry-pill-compact" title="Local Rendering Latency">
+                <Zap size={11} className="text-amber-500" />
+                <span>Local GPU: <strong>0ms</strong></span>
+              </div>
+
+              <span className="telemetry-sep">•</span>
+
+              <div className="telemetry-pill-compact" title="Outgoing Network Transmission Rate">
+                <Activity size={11} className="text-blue-600" />
+                <span>Transmit: <strong>{metrics.packetsSentPerSec || 0} pps</strong></span>
+              </div>
+
+              <span className="telemetry-sep">•</span>
+
+              <div className="telemetry-pill-compact" title="Active Batch Cadence Setting">
+                <Clock size={11} className="text-slate-600" />
+                <span>Cadence: <strong>{batchIntervalMs}ms</strong> (~{Math.round(1000 / (batchIntervalMs || 16))} fps)</span>
+              </div>
+
+              <span className="telemetry-sep">•</span>
+
+              <div className="telemetry-pill-compact" title="Round-trip Ping Latency">
+                <Sparkles size={11} className="text-indigo-600" />
+                <span>Latency: <strong>{metrics.latencyMs || 0}ms</strong></span>
+              </div>
+
+              <span className="telemetry-sep">•</span>
+
+              <div
+                className={`telemetry-pill-compact ${metrics.lastStrokeFlushedImmediately ? 'pulse-green' : ''}`}
+                title="Immediate Stroke Completion Flush on pointer release"
+              >
+                <CheckCircle2 size={11} className="text-emerald-600" />
+                <span>Stroke Flush: <strong>0ms delay</strong></span>
+              </div>
+
+              <span className="telemetry-sep">•</span>
+
+              <div className="telemetry-pill-compact" title="Total Elements on Board">
+                <Layers size={11} className="text-slate-500" />
+                <span>Elements: <strong>{metrics.elementCount || 0}</strong></span>
+              </div>
             </div>
+          ) : (
+            <div className="telemetry-track">
+              <div className="telemetry-pill-compact" title="Presenter Status">
+                <span className={`pill-dot ${broadcasterOnline ? 'green' : 'amber'}`} />
+                <span>Status: <strong>{broadcasterOnline ? 'Broadcaster Active' : 'Waiting for Broadcaster...'}</strong></span>
+              </div>
 
-            <span className="telemetry-sep">•</span>
+              <span className="telemetry-sep">•</span>
 
-            <div className="telemetry-pill-compact" title="Outgoing Network Transmission Rate">
-              <Activity size={11} className="text-blue-600" />
-              <span>Transmit: <strong>{metrics.packetsSentPerSec || 0} pps</strong></span>
+              <div className="telemetry-pill-compact" title="Incoming Stream Frame Frequency">
+                <Activity size={11} className="text-blue-600" />
+                <span>Stream: <strong>{metrics.incomingEventsPerSec || metrics.fps || 0} ev/s</strong></span>
+              </div>
+
+              <span className="telemetry-sep">•</span>
+
+              <div className="telemetry-pill-compact" title="End-to-End Receive-to-Apply Latency">
+                <Sparkles size={11} className="text-emerald-600" />
+                <span>Latency: <strong>{metrics.receiveToApplyLatencyMs || metrics.latencyMs || 0}ms</strong></span>
+              </div>
+
+              <span className="telemetry-sep">•</span>
+
+              <div className="telemetry-pill-compact" title="Receiver Buffer Queue Backlog">
+                <Clock size={11} className="text-slate-500" />
+                <span>Queue: <strong>{metrics.bufferedEvents || 0} buffered</strong></span>
+              </div>
+
+              <span className="telemetry-sep">•</span>
+
+              <div className="telemetry-pill-compact" title="Total Elements Rendered">
+                <Layers size={11} className="text-slate-500" />
+                <span>Elements: <strong>{metrics.elementCount || 0}</strong></span>
+              </div>
+
+              {metrics.healthStatus && metrics.healthStatus !== 'Optimal' && (
+                <>
+                  <span className="telemetry-sep">•</span>
+                  <div
+                    className={`telemetry-pill-compact health-${metrics.healthStatus.toLowerCase()}`}
+                    title={`Receiver State: ${metrics.healthStatus}`}
+                  >
+                    <span className="pill-dot amber" />
+                    <span>State: <strong>{metrics.healthStatus}</strong></span>
+                  </div>
+                </>
+              )}
             </div>
-
-            <span className="telemetry-sep">•</span>
-
-            <div className="telemetry-pill-compact" title="Active Batch Cadence Setting">
-              <Clock size={11} className="text-slate-600" />
-              <span>Cadence: <strong>{batchIntervalMs}ms</strong> (~{Math.round(1000 / (batchIntervalMs || 16))} fps)</span>
-            </div>
-
-            <span className="telemetry-sep">•</span>
-
-            <div className="telemetry-pill-compact" title="Round-trip Ping Latency">
-              <Sparkles size={11} className="text-indigo-600" />
-              <span>Latency: <strong>{metrics.latencyMs || 0}ms</strong></span>
-            </div>
-
-            <span className="telemetry-sep">•</span>
-
-            <div
-              className={`telemetry-pill-compact ${metrics.lastStrokeFlushedImmediately ? 'pulse-green' : ''}`}
-              title="Immediate Stroke Completion Flush on pointer release"
-            >
-              <CheckCircle2 size={11} className="text-emerald-600" />
-              <span>Stroke Flush: <strong>0ms delay</strong></span>
-            </div>
-
-            <span className="telemetry-sep">•</span>
-
-            <div className="telemetry-pill-compact" title="Total Elements on Board">
-              <Layers size={11} className="text-slate-500" />
-              <span>Elements: <strong>{metrics.elementCount || 0}</strong></span>
-            </div>
-          </div>
-        ) : (
-          <div className="telemetry-track">
-            <div className="telemetry-pill-compact" title="Presenter Status">
-              <span className={`pill-dot ${broadcasterOnline ? 'green' : 'amber'}`} />
-              <span>Status: <strong>{broadcasterOnline ? 'Broadcaster Active' : 'Waiting for Broadcaster...'}</strong></span>
-            </div>
-
-            <span className="telemetry-sep">•</span>
-
-            <div className="telemetry-pill-compact" title="Incoming Stream Frame Frequency">
-              <Activity size={11} className="text-blue-600" />
-              <span>Stream: <strong>{metrics.incomingEventsPerSec || metrics.fps || 0} ev/s</strong></span>
-            </div>
-
-            <span className="telemetry-sep">•</span>
-
-            <div className="telemetry-pill-compact" title="End-to-End Receive-to-Apply Latency">
-              <Sparkles size={11} className="text-emerald-600" />
-              <span>Latency: <strong>{metrics.receiveToApplyLatencyMs || metrics.latencyMs || 0}ms</strong></span>
-            </div>
-
-            <span className="telemetry-sep">•</span>
-
-            <div className="telemetry-pill-compact" title="Receiver Buffer Queue Backlog">
-              <Clock size={11} className="text-slate-500" />
-              <span>Queue: <strong>{metrics.bufferedEvents || 0} buffered</strong></span>
-            </div>
-
-            <span className="telemetry-sep">•</span>
-
-            <div className="telemetry-pill-compact" title="Total Elements Rendered">
-              <Layers size={11} className="text-slate-500" />
-              <span>Elements: <strong>{metrics.elementCount || 0}</strong></span>
-            </div>
-
-            {metrics.healthStatus && metrics.healthStatus !== 'Optimal' && (
-              <>
-                <span className="telemetry-sep">•</span>
-                <div
-                  className={`telemetry-pill-compact health-${metrics.healthStatus.toLowerCase()}`}
-                  title={`Receiver State: ${metrics.healthStatus}`}
-                >
-                  <span className="pill-dot amber" />
-                  <span>State: <strong>{metrics.healthStatus}</strong></span>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
     </header>
   );
 }

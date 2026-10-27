@@ -1,17 +1,18 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Excalidraw } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
-import { Sliders } from 'lucide-react';
+import { Sliders, Minimize2 } from 'lucide-react';
 import { TopToolbar } from '../components/TopToolbar';
 import { WhiteboardFrame } from '../components/WhiteboardFrame';
 import { StreamControlsPanel } from '../components/StreamControlsPanel';
 import { useWhiteboardViewer } from '../hooks/useWhiteboardViewer';
+import { MIN_VIEWER_ZOOM } from '../config/constants';
 
 // Memoized Viewer Canvas to completely isolate Excalidraw from toolbar telemetry updates
-const MemoizedStreamCanvas = React.memo(function MemoizedStreamCanvas({ onMount }) {
+const MemoizedStreamCanvas = React.memo(function MemoizedStreamCanvas({ onMount, isFullscreen }) {
   return (
-    <main className="canvas-viewport-wrapper stream-canvas excalidraw-menu-hidden">
-      <WhiteboardFrame zoom={1.0}>
+    <main className={`canvas-viewport-wrapper stream-canvas excalidraw-menu-hidden ${isFullscreen ? 'stream-fullscreen-viewport' : ''}`}>
+      <WhiteboardFrame zoom={1.0} minZoom={MIN_VIEWER_ZOOM} isStream={true}>
         <Excalidraw
           excalidrawAPI={onMount}
           viewModeEnabled={true}
@@ -45,6 +46,7 @@ export function StreamPage() {
     broadcasterOnline,
     metrics,
     excalidrawAPI,
+    fitToScreen,
     controls,
     updateControl,
     setProfile,
@@ -53,19 +55,72 @@ export function StreamPage() {
   } = useWhiteboardViewer({ roomId: 'default' });
 
   const [isControlsOpen, setIsControlsOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const containerRef = useRef(null);
 
   const toggleControls = useCallback(() => {
     setIsControlsOpen((prev) => !prev);
   }, []);
 
-  const toggleFullscreen = useCallback(() => {
-    if (!document.fullscreenElement) {
-      containerRef.current?.requestFullscreen?.();
-    } else {
-      document.exitFullscreen?.();
-    }
+  // Listen to native fullscreen changes (via Esc, browser UI, or API)
+  useEffect(() => {
+    const handleFsChange = () => {
+      const isNativeFs = !!(
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement ||
+        document.msFullscreenElement
+      );
+      setIsFullscreen(isNativeFs);
+    };
+
+    document.addEventListener('fullscreenchange', handleFsChange);
+    document.addEventListener('webkitfullscreenchange', handleFsChange);
+    document.addEventListener('mozfullscreenchange', handleFsChange);
+    document.addEventListener('MSFullscreenChange', handleFsChange);
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFsChange);
+      document.removeEventListener('webkitfullscreenchange', handleFsChange);
+      document.removeEventListener('mozfullscreenchange', handleFsChange);
+      document.removeEventListener('MSFullscreenChange', handleFsChange);
+    };
   }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    const isNativeFs = !!(
+      document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement
+    );
+
+    if (isNativeFs) {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      else if (document.mozCancelFullScreen) document.mozCancelFullScreen();
+      else if (document.msExitFullscreen) document.msExitFullscreen();
+      setIsFullscreen(false);
+    } else if (isFullscreen) {
+      // Fallback CSS fullscreen exit
+      setIsFullscreen(false);
+    } else if (el) {
+      if (el.requestFullscreen) {
+        el.requestFullscreen().catch(() => {
+          // Native fullscreen failed (common on iOS Safari) -> use bulletproof CSS fullscreen
+          setIsFullscreen(true);
+        });
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+      } else if (el.msRequestFullscreen) {
+        el.msRequestFullscreen();
+      } else {
+        // iOS Safari and mobile browsers without Fullscreen API
+        setIsFullscreen(true);
+      }
+    }
+  }, [isFullscreen]);
 
   const downloadSnapshotJson = useCallback(() => {
     if (!excalidrawAPI) return;
@@ -92,14 +147,16 @@ export function StreamPage() {
   }, [excalidrawAPI]);
 
   return (
-    <div className="page-layout" ref={containerRef}>
+    <div className={`page-layout ${isFullscreen ? 'stream-fullscreen' : ''}`} ref={containerRef}>
       {/* 1. Single Unified Top Toolbar (Contains all stream navigation, telemetry, and actions) */}
       <TopToolbar
         isConnected={isConnected}
         viewersCount={metrics.viewersCount}
         isStream={true}
+        onFitToScreen={fitToScreen}
         onExportJson={downloadSnapshotJson}
         onToggleFullscreen={toggleFullscreen}
+        isFullscreen={isFullscreen}
         onToggleControls={toggleControls}
         isControlsOpen={isControlsOpen}
         metrics={metrics}
@@ -107,7 +164,7 @@ export function StreamPage() {
       />
 
       {/* 2. Whiteboard Canvas (Zero re-renders; covers screen all the way down to bottom) */}
-      <MemoizedStreamCanvas onMount={setExcalidrawAPI} />
+      <MemoizedStreamCanvas onMount={setExcalidrawAPI} isFullscreen={isFullscreen} />
 
       {/* 3. Collapsible Stream Controls Panel */}
       <StreamControlsPanel
@@ -121,22 +178,20 @@ export function StreamPage() {
         metrics={metrics}
       />
 
-      {/* Floating Re-Open Button when panel is collapsed */}
-      {!isControlsOpen && (
+      {/* Floating Exit Fullscreen Button when in Fullscreen */}
+      {isFullscreen && (
         <button
           type="button"
-          onClick={() => setIsControlsOpen(true)}
-          className="floating-controls-trigger"
-          title="Open Stream Controls"
-          aria-label="Open Stream Controls"
+          onClick={toggleFullscreen}
+          className="floating-exit-fullscreen-btn"
+          title="Exit Fullscreen"
+          aria-label="Exit Fullscreen"
         >
-          <Sliders size={14} />
-          <span className="trigger-label">Stream Controls</span>
-          {metrics.isAutoThrottlingActive && (
-            <span className="trigger-pulse-dot" title="Auto-throttling active" />
-          )}
+          <Minimize2 size={14} />
+          <span>Exit Fullscreen</span>
         </button>
       )}
+
     </div>
   );
 }

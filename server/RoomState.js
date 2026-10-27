@@ -14,6 +14,8 @@ export class RoomState {
       zoom: { value: 1.0 },
       scrollX: 0,
       scrollY: 0,
+      width: 1600,
+      height: 900,
     };
     this.revision = 0;
     this.lastAutosave = Date.now();

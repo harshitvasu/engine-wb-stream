@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { getWebSocketUrl, MIN_ZOOM } from '../config/constants';
+import {
+  getWebSocketUrl,
+  MIN_ZOOM,
+  MIN_VIEWER_ZOOM,
+  FIXED_CANVAS_WIDTH,
+  FIXED_CANVAS_HEIGHT,
+} from '../config/constants';
 import {
   DEFAULT_STREAM_CONTROLS,
   STREAM_PROFILES,
@@ -131,11 +137,128 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const tabIdRef = useRef(Math.random().toString(36).substring(2, 9));
+  const lastBroadcasterAppStateRef = useRef({
+    zoom: { value: 1.0 },
+    scrollX: 0,
+    scrollY: 0,
+    width: FIXED_CANVAS_WIDTH,
+    height: FIXED_CANVAS_HEIGHT,
+  });
 
-  const setExcalidrawAPI = (api) => {
+  /**
+   * Computes responsive scale and centered pan for any viewer screen dimension.
+   * Compares the presenter's logical coordinate space (default 1600x900)
+   * to the current viewer canvas container dimensions, maintaining aspect ratio.
+   */
+  const computeScaledSceneAppState = useCallback((rawAppState) => {
+    if (!rawAppState) return null;
+
+    const api = excalidrawAPIRef.current;
+    const currentApp = api?.getAppState?.();
+
+    // 1. Get current viewer canvas viewport dimensions
+    let viewerWidth = currentApp?.width || 0;
+    let viewerHeight = currentApp?.height || 0;
+
+    if (!viewerWidth || !viewerHeight) {
+      const el = document.querySelector('.fixed-aspect-container') ||
+                 document.querySelector('.canvas-outer-wrapper') ||
+                 document.querySelector('.canvas-viewport-wrapper');
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        viewerWidth = rect.width;
+        viewerHeight = rect.height;
+      }
+    }
+
+    if (!viewerWidth || !viewerHeight) {
+      viewerWidth = window.innerWidth || FIXED_CANVAS_WIDTH;
+      viewerHeight = window.innerHeight || FIXED_CANVAS_HEIGHT;
+    }
+
+    // 2. Presenter reference dimensions (from broadcaster appState or default 1600x900)
+    const presenterWidth = rawAppState.width || FIXED_CANVAS_WIDTH;
+    const presenterHeight = rawAppState.height || FIXED_CANVAS_HEIGHT;
+
+    let scaleFactor = 1.0;
+    let extraSceneX = 0;
+    let extraSceneY = 0;
+
+    if (viewerWidth > 0 && viewerHeight > 0 && presenterWidth > 0 && presenterHeight > 0) {
+      const scaleX = viewerWidth / presenterWidth;
+      const scaleY = viewerHeight / presenterHeight;
+      scaleFactor = Math.min(scaleX, scaleY);
+
+      const presenterZoom = rawAppState.zoom?.value || 1.0;
+      if (scaleFactor > 0 && presenterZoom > 0) {
+        extraSceneX = (viewerWidth / scaleFactor - presenterWidth) / (2 * presenterZoom);
+        extraSceneY = (viewerHeight / scaleFactor - presenterHeight) / (2 * presenterZoom);
+      }
+    }
+
+    const presenterZoom = rawAppState.zoom?.value || 1.0;
+    const effectiveZoom = Math.max(MIN_VIEWER_ZOOM, presenterZoom * scaleFactor);
+
+    const effectiveScrollX = (rawAppState.scrollX !== undefined ? rawAppState.scrollX : 0) + extraSceneX;
+    const effectiveScrollY = (rawAppState.scrollY !== undefined ? rawAppState.scrollY : 0) + extraSceneY;
+
+    return {
+      zoom: { value: effectiveZoom },
+      scrollX: effectiveScrollX,
+      scrollY: effectiveScrollY,
+      scaleFactor,
+    };
+  }, []);
+
+  const fitToScreen = useCallback(() => {
+    const api = excalidrawAPIRef.current;
+    if (!api) return;
+    const elements = Array.from(elementsMapRef.current.values());
+    if (elements.length > 0) {
+      api.scrollToContent(elements, {
+        fitToViewport: true,
+        viewportZoomFactor: 0.95,
+        animate: false,
+      });
+    } else {
+      const baseState = lastBroadcasterAppStateRef.current || {
+        zoom: { value: 1.0 },
+        scrollX: 0,
+        scrollY: 0,
+        width: FIXED_CANVAS_WIDTH,
+        height: FIXED_CANVAS_HEIGHT,
+      };
+      const scaled = computeScaledSceneAppState(baseState);
+      if (scaled) {
+        api.updateScene({
+          appState: {
+            zoom: scaled.zoom,
+            scrollX: scaled.scrollX,
+            scrollY: scaled.scrollY,
+          },
+        });
+      }
+    }
+  }, [computeScaledSceneAppState]);
+
+  const setExcalidrawAPI = useCallback((api) => {
     excalidrawAPIRef.current = api;
     setExcalidrawAPIRaw(api);
-  };
+    if (api && lastBroadcasterAppStateRef.current) {
+      const scaled = computeScaledSceneAppState(lastBroadcasterAppStateRef.current);
+      if (scaled) {
+        api.updateScene({
+          appState: {
+            viewModeEnabled: true,
+            zenModeEnabled: true,
+            zoom: scaled.zoom,
+            scrollX: scaled.scrollX,
+            scrollY: scaled.scrollY,
+          },
+        });
+      }
+    }
+  }, [computeScaledSceneAppState]);
 
   /**
    * Applies an incoming message to the canonical elementsMapRef and tracks revisions.
@@ -157,6 +280,12 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
       if (msg.stats?.broadcastersCount !== undefined) {
         broadcastersCountRef.current = msg.stats.broadcastersCount;
         setBroadcasterOnline(msg.stats.broadcastersCount > 0);
+      }
+      if (msg.appState) {
+        lastBroadcasterAppStateRef.current = {
+          ...lastBroadcasterAppStateRef.current,
+          ...msg.appState,
+        };
       }
       return { type: 'snapshot', appState: msg.appState };
     }
@@ -324,15 +453,18 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
     const api = excalidrawAPIRef.current;
     if (hadChanges && api) {
       if (hadClear) {
+        const scaled = computeScaledSceneAppState(
+          lastBroadcasterAppStateRef.current || { zoom: { value: 1.0 }, scrollX: 0, scrollY: 0 }
+        );
         api.updateScene({
           elements: [],
           commitToHistory: false,
           appState: {
             viewModeEnabled: true,
             zenModeEnabled: true,
-            zoom: { value: MIN_ZOOM },
-            scrollX: 0,
-            scrollY: 0,
+            zoom: scaled?.zoom || { value: MIN_VIEWER_ZOOM },
+            scrollX: scaled?.scrollX || 0,
+            scrollY: scaled?.scrollY || 0,
           },
         });
       } else {
@@ -346,18 +478,20 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
         };
 
         if (mergedAppState) {
+          lastBroadcasterAppStateRef.current = {
+            ...lastBroadcasterAppStateRef.current,
+            ...mergedAppState,
+          };
           if (mergedAppState.viewBackgroundColor && hadSnapshot) {
             sceneUpdate.appState.viewBackgroundColor = mergedAppState.viewBackgroundColor;
           }
-          if (mergedAppState.zoom) {
-            sceneUpdate.appState.zoom = mergedAppState.zoom;
-          }
-          if (mergedAppState.scrollX !== undefined) {
-            sceneUpdate.appState.scrollX = mergedAppState.scrollX;
-          }
-          if (mergedAppState.scrollY !== undefined) {
-            sceneUpdate.appState.scrollY = mergedAppState.scrollY;
-          }
+        }
+
+        const scaled = computeScaledSceneAppState(lastBroadcasterAppStateRef.current);
+        if (scaled) {
+          sceneUpdate.appState.zoom = scaled.zoom;
+          sceneUpdate.appState.scrollX = scaled.scrollX;
+          sceneUpdate.appState.scrollY = scaled.scrollY;
         }
 
         api.updateScene(sceneUpdate);
@@ -507,15 +641,18 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
 
           if (result && api) {
             if (result.type === 'clear') {
+              const scaled = computeScaledSceneAppState(
+                lastBroadcasterAppStateRef.current || { zoom: { value: 1.0 }, scrollX: 0, scrollY: 0 }
+              );
               api.updateScene({
                 elements: [],
                 commitToHistory: false,
                 appState: {
                   viewModeEnabled: true,
                   zenModeEnabled: true,
-                  zoom: { value: MIN_ZOOM },
-                  scrollX: 0,
-                  scrollY: 0,
+                  zoom: scaled?.zoom || { value: MIN_VIEWER_ZOOM },
+                  scrollX: scaled?.scrollX || 0,
+                  scrollY: scaled?.scrollY || 0,
                 },
               });
             } else {
@@ -528,12 +665,19 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
                 },
               };
               if (result.appState) {
+                lastBroadcasterAppStateRef.current = {
+                  ...lastBroadcasterAppStateRef.current,
+                  ...result.appState,
+                };
                 if (result.appState.viewBackgroundColor && result.type === 'snapshot') {
                   sceneUpdate.appState.viewBackgroundColor = result.appState.viewBackgroundColor;
                 }
-                if (result.appState.zoom) sceneUpdate.appState.zoom = result.appState.zoom;
-                if (result.appState.scrollX !== undefined) sceneUpdate.appState.scrollX = result.appState.scrollX;
-                if (result.appState.scrollY !== undefined) sceneUpdate.appState.scrollY = result.appState.scrollY;
+              }
+              const scaled = computeScaledSceneAppState(lastBroadcasterAppStateRef.current);
+              if (scaled) {
+                sceneUpdate.appState.zoom = scaled.zoom;
+                sceneUpdate.appState.scrollX = scaled.scrollX;
+                sceneUpdate.appState.scrollY = scaled.scrollY;
               }
               api.updateScene(sceneUpdate);
             }
@@ -704,6 +848,51 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
     };
   }, [connect]);
 
+  // Responsive scale update when viewer window resizes or device orientation changes
+  useEffect(() => {
+    const handleResize = () => {
+      const api = excalidrawAPIRef.current;
+      if (!api) return;
+
+      const baseState = lastBroadcasterAppStateRef.current || {
+        zoom: { value: 1.0 },
+        scrollX: 0,
+        scrollY: 0,
+        width: FIXED_CANVAS_WIDTH,
+        height: FIXED_CANVAS_HEIGHT,
+      };
+      const scaled = computeScaledSceneAppState(baseState);
+      if (scaled) {
+        api.updateScene({
+          appState: {
+            zoom: scaled.zoom,
+            scrollX: scaled.scrollX,
+            scrollY: scaled.scrollY,
+          },
+        });
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('orientationchange', handleResize);
+
+    let ro = null;
+    const el = document.querySelector('.fixed-aspect-container') ||
+               document.querySelector('.canvas-outer-wrapper');
+    if (el && typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => {
+        handleResize();
+      });
+      ro.observe(el);
+    }
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('orientationchange', handleResize);
+      if (ro) ro.disconnect();
+    };
+  }, [computeScaledSceneAppState]);
+
   // Explicit retry connection handler
   const retryConnection = useCallback(() => {
     clearTimeout(reconnectTimeoutRef.current);
@@ -724,6 +913,7 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
     metrics,
     streamError,
     retryConnection,
+    fitToScreen,
     // Stream Controls
     controls,
     updateControl,

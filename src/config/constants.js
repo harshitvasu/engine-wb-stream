@@ -3,10 +3,12 @@ export const FIXED_CANVAS_WIDTH = 1600;
 export const FIXED_CANVAS_HEIGHT = 900;
 export const FIXED_ASPECT_RATIO = 16 / 9;
 
-// Zoom Constraints: Zoom-in ONLY on initial pixels
-export const MIN_ZOOM = 1.0; // 100% - Cannot zoom out past initial full canvas
+// Zoom Constraints: Zoom-in ONLY on initial pixels for writer
+export const MIN_ZOOM = 1.0; // 100% - Cannot zoom out past initial full canvas for writer
 export const MAX_ZOOM = 5.0; // 500% - Zoom in up to 5x for fine details
 export const INITIAL_ZOOM = 1.0;
+// Viewer minimum zoom allows responsive down-scaling to fit mobile and small displays
+export const MIN_VIEWER_ZOOM = 0.05; // 5% - Supports full responsive fit on small screens
 
 // Network & Streaming Cadence Settings
 export const NETWORK_BATCH_INTERVALS = {

@@ -5,6 +5,8 @@ import {
   getWebSocketUrl,
   MIN_ZOOM,
   MAX_ZOOM,
+  FIXED_CANVAS_WIDTH,
+  FIXED_CANVAS_HEIGHT,
 } from '../config/constants';
 import { clampZoom } from '../utils/canvasBounds';
 
@@ -294,6 +296,8 @@ export function useWhiteboardStreamer({ roomId = 'default', initialBatchInterval
             zoom: latestAppStateRef.current?.zoom,
             scrollX: latestAppStateRef.current?.scrollX,
             scrollY: latestAppStateRef.current?.scrollY,
+            width: latestAppStateRef.current?.width || FIXED_CANVAS_WIDTH,
+            height: latestAppStateRef.current?.height || FIXED_CANVAS_HEIGHT,
           },
           sequence: sequenceRef.current,
           timestamp: Date.now(),
@@ -341,6 +345,8 @@ export function useWhiteboardStreamer({ roomId = 'default', initialBatchInterval
         zoom: latestAppStateRef.current?.zoom,
         scrollX: latestAppStateRef.current?.scrollX,
         scrollY: latestAppStateRef.current?.scrollY,
+        width: latestAppStateRef.current?.width || FIXED_CANVAS_WIDTH,
+        height: latestAppStateRef.current?.height || FIXED_CANVAS_HEIGHT,
       },
       sequence: sequenceRef.current,
       timestamp: Date.now(),

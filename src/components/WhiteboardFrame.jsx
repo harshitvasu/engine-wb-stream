@@ -9,10 +9,13 @@ import { MIN_ZOOM } from '../config/constants';
 export function WhiteboardFrame({
   children,
   zoom = 1.0,
+  minZoom = MIN_ZOOM,
+  isStream = false,
+  className = '',
 }) {
   const containerRef = useRef(null);
 
-  // Prevent zoom out past 100% on mouse wheel / trackpad pinch
+  // Prevent zoom out past minZoom on mouse wheel / trackpad pinch
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -21,7 +24,7 @@ export function WhiteboardFrame({
       // If user holds Ctrl/Cmd to zoom or pinch-zooms
       if (e.ctrlKey || e.metaKey) {
         // e.deltaY > 0 represents zooming out
-        if (e.deltaY > 0 && zoom <= MIN_ZOOM) {
+        if (e.deltaY > 0 && zoom <= minZoom) {
           e.preventDefault();
           e.stopPropagation();
         }
@@ -32,10 +35,10 @@ export function WhiteboardFrame({
     return () => {
       el.removeEventListener('wheel', handleWheel, { capture: true });
     };
-  }, [zoom]);
+  }, [zoom, minZoom]);
 
   return (
-    <div className="canvas-outer-wrapper">
+    <div className={`canvas-outer-wrapper ${isStream ? 'stream-outer-wrapper' : ''} ${className}`}>
       <div ref={containerRef} className="fixed-aspect-container">
         <div className="excalidraw-mount-point">
           {children}

@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "postinstall": "node scripts/copy-excalidraw-assets.js",
     "test": "node test/streamTest.js && node test/optimizationTests.js && node test/streamControlsTest.js",
+    "test:scale": "node test/responsiveScaleTest.js",
     "test:benchmark": "node test/loadBenchmark.js"
   },
   "dependencies": {

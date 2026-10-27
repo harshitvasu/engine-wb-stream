@@ -391,6 +391,52 @@ html, body, #root {
   padding: 4px 6px;
 }
 
+/* Telemetry Toggle Button on Main Toolbar Row */
+.telemetry-toggle-btn {
+  background-color: #f8fafc;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.telemetry-toggle-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-main);
+  border-color: var(--border-subtle);
+}
+
+.telemetry-toggle-btn.active {
+  background-color: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1e40af;
+}
+
+.telemetry-chevron {
+  display: inline-flex;
+  align-items: center;
+  color: inherit;
+  opacity: 0.7;
+}
+
+.telemetry-toggle-btn:hover .telemetry-chevron {
+  opacity: 1;
+}
+
+/* Smooth expansion animation when showing telemetry */
+.toolbar-row-telemetry {
+  animation: slide-down-telemetry 0.16s ease-out;
+}
+
+@keyframes slide-down-telemetry {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .status-badge {
   display: flex;
   align-items: center;
@@ -1235,4 +1281,126 @@ html, body, #root {
   background-color: #0f172a;
   border-color: #0f172a;
   color: #ffffff;
+}
+
+/* ==========================================================================
+   STREAM FULLSCREEN & RESPONSIVE AUTO-SCALING STYLES
+   ========================================================================== */
+.page-layout.stream-fullscreen,
+.page-layout:fullscreen,
+.page-layout:-webkit-full-screen {
+  background-color: #0b0f19 !important;
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 99999 !important;
+}
+
+.page-layout.stream-fullscreen .canvas-viewport-wrapper,
+.page-layout:fullscreen .canvas-viewport-wrapper,
+.page-layout:-webkit-full-screen .canvas-viewport-wrapper {
+  padding: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  background-color: #0b0f19 !important;
+}
+
+.page-layout.stream-fullscreen .canvas-outer-wrapper,
+.page-layout:fullscreen .canvas-outer-wrapper,
+.page-layout:-webkit-full-screen .canvas-outer-wrapper {
+  max-width: min(100vw, calc(100vh * 16 / 9)) !important;
+  max-height: min(100vh, calc(100vw * 9 / 16)) !important;
+  border-radius: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.floating-exit-fullscreen-btn {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 100000;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+  background-color: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 9999px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.floating-exit-fullscreen-btn:hover {
+  background-color: rgba(15, 23, 42, 1);
+  transform: scale(1.04);
+}
+
+.floating-exit-fullscreen-btn:active {
+  transform: scale(0.96);
+}
+
+.tool-btn-sm.fit-screen-btn {
+  background-color: #eff6ff;
+  border-color: #bfdbfe;
+  color: var(--accent-blue);
+}
+
+.tool-btn-sm.fit-screen-btn:hover {
+  background-color: #dbeafe;
+}
+
+/* Responsive adjustment for mobile viewports */
+@media (max-width: 768px) {
+  .canvas-viewport-wrapper {
+    padding: 2px 4px;
+  }
+
+  .canvas-viewport-wrapper.stream-canvas {
+    padding: 0;
+  }
+
+  .canvas-outer-wrapper.stream-outer-wrapper {
+    border-radius: 4px;
+    border: none;
+    box-shadow: none;
+    max-width: 100%;
+    max-height: 100%;
+  }
+
+  .toolbar-row-main {
+    padding: 0 8px;
+    gap: 4px;
+  }
+
+  .brand-name {
+    font-size: 13px;
+  }
+
+  .btn-label-responsive {
+    display: none;
+  }
+
+  .tool-btn-sm {
+    padding: 4px 6px;
+  }
+
+  .action-btn-sm {
+    padding: 4px 6px;
+  }
+
+  .telemetry-track {
+    gap: 6px;
+    font-size: 10px;
+  }
+
+  .ratio-indicator {
+    display: none;
+  }
 }
