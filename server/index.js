@@ -240,6 +240,14 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'share_mode': {
+          if (!currentRoom) currentRoom = getOrCreateRoom(message.roomId || 'default');
+          if (typeof message.activeShare === 'string') {
+            currentRoom.setActiveShare(message.activeShare);
+          }
+          break;
+        }
+
         case 'clear': {
           if (currentRoom) {
             currentRoom.clear();

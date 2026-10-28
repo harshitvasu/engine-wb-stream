@@ -2,6 +2,8 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { TopToolbar } from '../components/TopToolbar';
 import { WhiteboardCanvas } from '../components/WhiteboardCanvas';
+import { ScreenShareView } from '../components/ScreenShareView';
+import { FullVideoView } from '../components/FullVideoView';
 import { PublisherVideoThumbnail } from '../components/PublisherVideoThumbnail';
 import { useWhiteboardStreamer } from '../hooks/useWhiteboardStreamer';
 import { useWebRTCStreamer } from '../hooks/useWebRTCStreamer';
@@ -16,10 +18,7 @@ export function WritePage() {
   }, []);
 
   // App-level locked fullscreen: only the fullscreen button controls entering/exiting fullscreen.
-  // We avoid native HTML5 requestFullscreen() here, because mobile/tablet OSes (e.g. iPadOS/Android)
-  // intercept downward finger drag gestures to cancel native fullscreen.
   const toggleFullscreen = useCallback(() => {
-    // If native fullscreen was somehow active, exit it cleanly
     const isNativeFs = !!(
       document.fullscreenElement ||
       document.webkitFullscreenElement ||
@@ -59,6 +58,8 @@ export function WritePage() {
     zoomIn,
     resetZoom,
     clearCanvas,
+    activeShareMode,
+    broadcastShareMode,
     broadcastVideoRotation,
     metrics,
     handleExcalidrawChange,
@@ -66,8 +67,17 @@ export function WritePage() {
     handlePointerUp,
   } = useWhiteboardStreamer({ roomId: 'default' });
 
+  const handleScreenShareEnded = useCallback(() => {
+    broadcastShareMode('whiteboard');
+  }, [broadcastShareMode]);
+
   const {
     localStream,
+    screenStream,
+    isScreenSharing,
+    startScreenShare,
+    stopScreenShare,
+    toggleScreenShare,
     isMicMuted,
     isVideoDisabled,
     isRtcConnected,
@@ -78,7 +88,33 @@ export function WritePage() {
     toggleMic,
     toggleVideo,
     retryWebRTC,
-  } = useWebRTCStreamer({ roomId: 'default', autoStart: !writeError });
+  } = useWebRTCStreamer({
+    roomId: 'default',
+    autoStart: !writeError,
+    activeShareMode,
+    onScreenShareEnded: handleScreenShareEnded,
+  });
+
+  // Handle switching presentation share mode (Whiteboard, Screen Share, Full Video)
+  const handleSelectShareMode = useCallback(async (mode) => {
+    if (mode === 'screen') {
+      if (!isScreenSharing) {
+        const stream = await startScreenShare();
+        if (!stream) return; // User cancelled or permission denied
+      }
+      broadcastShareMode('screen');
+    } else if (mode === 'video') {
+      if (isScreenSharing) {
+        stopScreenShare();
+      }
+      broadcastShareMode('video');
+    } else {
+      if (isScreenSharing) {
+        stopScreenShare();
+      }
+      broadcastShareMode('whiteboard');
+    }
+  }, [isScreenSharing, startScreenShare, stopScreenShare, broadcastShareMode]);
 
   const handleRotateVideo = useCallback(() => {
     setVideoRotation((prev) => {
@@ -93,7 +129,7 @@ export function WritePage() {
       ref={containerRef}
       className={`page-layout ${isFullscreen ? 'write-fullscreen' : ''}`}
     >
-      {/* 1. Single Unified Top Toolbar (Contains all navigation, cadence parameters, telemetry, and actions; hidden in write-fullscreen) */}
+      {/* 1. Single Unified Top Toolbar with Presentation Mode Selector */}
       <TopToolbar
         isConnected={isConnected && !writeError}
         viewersCount={metrics.viewersCount}
@@ -108,9 +144,13 @@ export function WritePage() {
         metrics={metrics}
         isFullscreen={isFullscreen}
         onToggleFullscreen={toggleFullscreen}
+        activeShareMode={activeShareMode}
+        onSelectShareMode={handleSelectShareMode}
+        isScreenSharing={isScreenSharing}
+        onToggleScreenShare={toggleScreenShare}
       />
 
-      {/* 2. Error Screen when 2nd write window tries to open, or Whiteboard Canvas */}
+      {/* 2. Error Screen when 2nd write window tries to open, or Active Presentation Stage */}
       {writeError ? (
         <main className="canvas-viewport-wrapper">
           <div className="canvas-outer-wrapper stream-error-wrapper">
@@ -138,8 +178,27 @@ export function WritePage() {
             </div>
           </div>
         </main>
+      ) : activeShareMode === 'screen' ? (
+        /* Screen Share Presentation Stage (Presenter Screen Preview - Muted) */
+        <ScreenShareView
+          stream={screenStream}
+          isLive={isScreenSharing}
+          isFullscreen={isFullscreen}
+          onToggleFullscreen={toggleFullscreen}
+          isPublisher={true}
+        />
+      ) : activeShareMode === 'video' ? (
+        /* Full Resolution Presenter Video Stage (Broadcaster Preview - Muted) */
+        <FullVideoView
+          stream={localStream}
+          isLive={!isVideoDisabled}
+          isFullscreen={isFullscreen}
+          onToggleFullscreen={toggleFullscreen}
+          rotation={videoRotation}
+          isPublisher={true}
+        />
       ) : (
-        /* Isolated & Memoized Whiteboard Canvas (Zero re-renders; covers screen all the way down to bottom) */
+        /* Isolated & Memoized Whiteboard Canvas */
         <WhiteboardCanvas
           onMount={setExcalidrawAPI}
           onChange={handleExcalidrawChange}
@@ -156,14 +215,16 @@ export function WritePage() {
         />
       )}
 
-      {/* Floating WebRTC Broadcaster Audio/Video Thumbnail (Direct local source display, visible in normal and fullscreen) */}
-      {!writeError && (
+      {/* Floating WebRTC Broadcaster Audio/Video Thumbnail (Always visible in Whiteboard and Screen Share modes) */}
+      {!writeError && activeShareMode !== 'video' && (
         <PublisherVideoThumbnail
           stream={localStream}
           isPublisher={true}
           isConnected={isRtcConnected}
           isMicMuted={isMicMuted}
           isVideoDisabled={isVideoDisabled}
+          isScreenSharing={isScreenSharing}
+          onToggleScreenShare={toggleScreenShare}
           rotation={videoRotation}
           onRotate={handleRotateVideo}
           onToggleMic={toggleMic}

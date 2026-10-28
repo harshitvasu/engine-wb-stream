@@ -580,10 +580,10 @@ async fn test_audio_and_video_forwarding_one_to_many() -> Result<(), Box<dyn std
                                     role: res.as_str().to_string(),
                                 });
                             }
-                            webrtc_sfu::signaling::ClientMessage::Offer { sdp, peer_id } => {
+                            webrtc_sfu::signaling::ClientMessage::Offer { sdp, peer_id, tracks } => {
                                 let (answer_sdp, transmits) = {
                                     let mut m = mgr.lock().await;
-                                    m.handle_offer("test-room", &peer_id, &sdp).unwrap()
+                                    m.handle_offer("test-room", &peer_id, &sdp, tracks.as_ref()).unwrap()
                                 };
                                 let _ = tx.send(webrtc_sfu::signaling::ServerMessage::Answer {
                                     sdp: answer_sdp,

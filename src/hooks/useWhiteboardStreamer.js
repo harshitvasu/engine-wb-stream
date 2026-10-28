@@ -481,6 +481,22 @@ export function useWhiteboardStreamer({ roomId = 'default', initialBatchInterval
     }
   }, [roomId]);
 
+  const [activeShareMode, setActiveShareModeState] = useState('whiteboard');
+
+  const broadcastShareMode = useCallback((mode) => {
+    setActiveShareModeState(mode);
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'share_mode',
+          roomId,
+          activeShare: mode,
+          timestamp: Date.now(),
+        })
+      );
+    }
+  }, [roomId]);
+
   const broadcastVideoRotation = useCallback((rotation) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -510,6 +526,8 @@ export function useWhiteboardStreamer({ roomId = 'default', initialBatchInterval
     zoomIn,
     resetZoom,
     clearCanvas,
+    activeShareMode,
+    broadcastShareMode,
     broadcastVideoRotation,
     metrics,
     handleExcalidrawChange,

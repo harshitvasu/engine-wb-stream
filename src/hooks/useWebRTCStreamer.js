@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { getSfuWebSocketUrl } from '../config/constants';
 
 /**
- * Draws the camera feed into a fixed 16:9 canvas (320x180) rotated by `rotationDeg`.
- * Guarantees aspect ratio preservation with clean slate letterboxing for portrait rotations.
+ * Draws the camera feed into a canvas sized to (cw x ch) rotated by `rotationDeg`.
+ * Supports full resolution (1080p / 720p) with clean slate letterboxing for portrait rotations.
  */
 function drawRotatedVideoFrame(ctx, video, cw, ch, rotationDeg) {
   ctx.fillStyle = '#090d16';
@@ -37,15 +37,23 @@ function drawRotatedVideoFrame(ctx, video, cw, ch, rotationDeg) {
 
 /**
  * Custom hook for the Broadcaster / Publisher to:
- * - Capture local microphone audio (Opus) and camera thumbnail directly from local devices
- * - Real-time pixel-level video rotation pipeline (90, 180, 270, 360 deg) captured via canvas
- * - Display the local camera source directly (unstreamed, muted locally to prevent feedback)
- * - Establish an encrypted WebRTC PeerConnection with the custom Rust SFU to broadcast tracks
- * - Toggle microphone muting and camera enable/disable on active tracks and senders
- * - Gracefully handle device permission denials and reconnections
+ * - Capture local microphone audio (Opus) and camera at Full Resolution (1080p / 720p HD)
+ * - Capture screen sharing via getDisplayMedia at Full Resolution (1080p / 4k @ 30-60fps) with optional screen audio
+ * - Real-time pixel-level video rotation pipeline (90, 180, 270, 360 deg) at native video resolution
+ * - Establish an encrypted WebRTC PeerConnection with the custom Rust SFU broadcasting Audio, Video, and Screen tracks
+ * - Web Audio mixer combining microphone speech and screen audio
+ * - Toggle microphone muting, camera enable/disable, and screen sharing
+ * - Gracefully handle device permission denials, browser screen share bar events, and reconnections
  */
-export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {}) {
+export function useWebRTCStreamer({
+  roomId = 'default',
+  autoStart = true,
+  activeShareMode = 'whiteboard',
+  onScreenShareEnded,
+} = {}) {
   const [localStream, setLocalStream] = useState(null);
+  const [screenStream, setScreenStream] = useState(null);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isVideoDisabled, setIsVideoDisabled] = useState(false);
   const [isRtcConnected, setIsRtcConnected] = useState(false);
@@ -53,20 +61,68 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
   const [permissionError, setPermissionError] = useState(null);
   const [videoRotation, setVideoRotationState] = useState(0);
 
+  const activeShareModeRef = useRef(activeShareMode);
+  activeShareModeRef.current = activeShareMode;
+
+  const onScreenShareEndedRef = useRef(onScreenShareEnded);
+  onScreenShareEndedRef.current = onScreenShareEnded;
+
   const pcRef = useRef(null);
   const wsRef = useRef(null);
   const peerIdRef = useRef(`pub-${Math.random().toString(36).substring(2, 9)}`);
   const rawStreamRef = useRef(null);
   const localStreamRef = useRef(null);
+  const screenStreamRef = useRef(null);
   const rawVideoRef = useRef(null);
   const canvasRef = useRef(null);
   const rotationRef = useRef(0);
   const renderLoopActiveRef = useRef(false);
 
+  // Transceiver Send Senders
+  const audioSenderRef = useRef(null);
+  const videoSenderRef = useRef(null);
+  const screenSenderRef = useRef(null);
+
+  // Web Audio Mixer for Mic + Screen Audio
+  const audioCtxRef = useRef(null);
+  const audioDestRef = useRef(null);
+  const micSourceNodeRef = useRef(null);
+  const screenAudioSourceNodeRef = useRef(null);
+  const screenAudioTrackRef = useRef(null);
+
   const reconnectTimeoutRef = useRef(null);
   const pingIntervalRef = useRef(null);
   const isAcquiringMediaRef = useRef(false);
   const isCleaningUpRef = useRef(false);
+
+  // Dynamically update WebRTC video encoding bitrate:
+  // - In 'video' mode: full 720p HD @ 2.2 Mbps
+  // - In non-video mode (whiteboard or screen): throttle bitrate to ~300 kbps for thumbnail (saves bandwidth)
+  const updateVideoEncodingParameters = useCallback(async (mode) => {
+    const sender = videoSenderRef.current;
+    const pc = pcRef.current;
+    if (!sender || !sender.track || !pc || pc.connectionState !== 'connected') return;
+    try {
+      const params = sender.getParameters();
+      if (!params || !params.encodings || params.encodings.length === 0) return;
+
+      if (mode === 'video') {
+        params.encodings[0].maxBitrate = 2200000; // 2.2 Mbps
+        params.encodings[0].maxFramerate = 30;
+      } else {
+        params.encodings[0].maxBitrate = 300000; // 300 kbps
+        params.encodings[0].maxFramerate = 24;
+      }
+      await sender.setParameters(params);
+    } catch (err) {
+      console.warn('[WebRTC Streamer] Video parameters update warning:', err);
+    }
+  }, []);
+
+  // Update video encoding whenever presentation share mode changes
+  useEffect(() => {
+    updateVideoEncodingParameters(activeShareMode);
+  }, [activeShareMode, updateVideoEncodingParameters]);
 
   // Rotate broadcast video stream by given angle (90, 180, 270, 360...)
   const setVideoRotation = useCallback((angleOrUpdater) => {
@@ -77,9 +133,61 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
     });
   }, []);
 
-  // 1. Acquire local camera and microphone stream directly from user devices
+  // Web Audio Mixer setup: mixes mic audio and screen audio into single clean Opus track
+  const setupAudioMixer = useCallback(() => {
+    try {
+      const micTrack = rawStreamRef.current?.getAudioTracks()?.[0];
+      const screenAudioTrack = screenAudioTrackRef.current;
+
+      if (!audioCtxRef.current) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (AudioContextClass) {
+          audioCtxRef.current = new AudioContextClass();
+          audioDestRef.current = audioCtxRef.current.createMediaStreamDestination();
+        }
+      }
+
+      const ctx = audioCtxRef.current;
+      const dest = audioDestRef.current;
+      if (!ctx || !dest) return;
+
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+
+      // Reconnect mic source
+      if (micSourceNodeRef.current) {
+        try { micSourceNodeRef.current.disconnect(); } catch {}
+        micSourceNodeRef.current = null;
+      }
+      if (micTrack) {
+        const micStream = new MediaStream([micTrack]);
+        micSourceNodeRef.current = ctx.createMediaStreamSource(micStream);
+        micSourceNodeRef.current.connect(dest);
+      }
+
+      // Reconnect screen audio source
+      if (screenAudioSourceNodeRef.current) {
+        try { screenAudioSourceNodeRef.current.disconnect(); } catch {}
+        screenAudioSourceNodeRef.current = null;
+      }
+      if (screenAudioTrack && screenAudioTrack.readyState === 'live') {
+        const scrStream = new MediaStream([screenAudioTrack]);
+        screenAudioSourceNodeRef.current = ctx.createMediaStreamSource(scrStream);
+        screenAudioSourceNodeRef.current.connect(dest);
+      }
+
+      const mixedAudioTrack = dest.stream.getAudioTracks()[0];
+      if (mixedAudioTrack && audioSenderRef.current) {
+        audioSenderRef.current.replaceTrack(mixedAudioTrack);
+      }
+    } catch (err) {
+      console.warn('[WebRTC Publisher] Audio mixer setup warning:', err);
+    }
+  }, []);
+
+  // 1. Acquire local camera and microphone stream at Full Resolution directly from user devices
   const acquireMedia = useCallback(async () => {
-    // If a live stream already exists, reuse it rather than re-prompting devices
     if (localStreamRef.current) {
       const activeTracks = localStreamRef.current.getTracks().filter((t) => t.readyState === 'live');
       if (activeTracks.length > 0) {
@@ -99,7 +207,7 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
 
       let stream = null;
 
-      // Strategy 1: Low-overhead thumbnail video constraints + noise-cancelled audio
+      // Strategy 1: Standard 720p HD camera video + noise-cancelled audio
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -108,27 +216,40 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
             autoGainControl: true,
           },
           video: {
-            width: { ideal: 320 },
-            height: { ideal: 180 },
+            width: { ideal: 1280, max: 1280, min: 640 },
+            height: { ideal: 720, max: 720, min: 360 },
             frameRate: { ideal: 30, max: 30 },
           },
         });
       } catch (err1) {
-        console.warn('[WebRTC Publisher] Constrained media failed, trying basic {audio: true, video: true}:', err1);
+        console.warn('[WebRTC Publisher] 720p media failed, trying basic 720p/360p fallback:', err1);
         try {
-          // Strategy 2: Basic unconstrained audio and video
-          stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+          // Strategy 2: 720p / 360p fallback
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true },
+            video: {
+              width: { ideal: 1280, min: 480 },
+              height: { ideal: 720, min: 270 },
+              frameRate: { ideal: 30 },
+            },
+          });
         } catch (err2) {
-          console.warn('[WebRTC Publisher] Combined media failed, trying audio-only fallback:', err2);
+          console.warn('[WebRTC Publisher] 720p fallback failed, trying basic unconstrained {audio: true, video: true}:', err2);
           try {
-            // Strategy 3: Audio only
-            stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-            setIsVideoDisabled(true);
+            // Strategy 3: Basic unconstrained audio and video
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
           } catch (err3) {
-            console.warn('[WebRTC Publisher] Audio fallback failed, trying video-only fallback:', err3);
-            // Strategy 4: Video only
-            stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
-            setIsMicMuted(true);
+            console.warn('[WebRTC Publisher] Combined media failed, trying audio-only fallback:', err3);
+            try {
+              // Strategy 4: Audio only
+              stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+              setIsVideoDisabled(true);
+            } catch (err4) {
+              console.warn('[WebRTC Publisher] Audio fallback failed, trying video-only fallback:', err4);
+              // Strategy 5: Video only
+              stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+              setIsMicMuted(true);
+            }
           }
         }
       }
@@ -141,7 +262,7 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
 
       const rawVideoTracks = stream.getVideoTracks();
       if (rawVideoTracks.length > 0) {
-        // Setup hidden video element to decode and drive raw camera frames
+        // Setup hidden video element to decode raw camera frames
         const rawVideo = document.createElement('video');
         rawVideo.muted = true;
         rawVideo.playsInline = true;
@@ -149,10 +270,10 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
         rawVideo.srcObject = stream;
         rawVideoRef.current = rawVideo;
 
-        // Setup hidden 2D canvas (fixed 320x180 16:9 standard thumbnail format)
+        // Dynamic resolution canvas capped at 720p HD (1280x720) for rotation and encoding
         const canvas = document.createElement('canvas');
-        canvas.width = 320;
-        canvas.height = 180;
+        canvas.width = 1280;
+        canvas.height = 720;
         const ctx = canvas.getContext('2d', { alpha: false });
         canvasRef.current = canvas;
 
@@ -162,21 +283,36 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
           console.warn('[WebRTC Publisher] Hidden raw video auto-play caught:', e);
         }
 
-        // Active frame capture loop: renders camera frames with rotationRef.current applied to pixels
+        // Adjust canvas resolution once video metadata is loaded, capped strictly at 720p
+        const updateCanvasDims = () => {
+          if (rawVideo.videoWidth && rawVideo.videoHeight) {
+            const maxW = 1280;
+            const maxH = 720;
+            const scale = Math.min(maxW / rawVideo.videoWidth, maxH / rawVideo.videoHeight, 1.0);
+            canvas.width = Math.round(rawVideo.videoWidth * scale);
+            canvas.height = Math.round(rawVideo.videoHeight * scale);
+          }
+        };
+        rawVideo.addEventListener('loadedmetadata', updateCanvasDims);
+        updateCanvasDims();
+
+        // Active frame capture loop: renders camera frames with rotationRef.current applied at full resolution
         renderLoopActiveRef.current = true;
         const scheduleFrame = () => {
           if (!renderLoopActiveRef.current) return;
+          const cw = canvas.width || 1280;
+          const ch = canvas.height || 720;
           if ('requestVideoFrameCallback' in rawVideo) {
             rawVideo.requestVideoFrameCallback(() => {
               if (renderLoopActiveRef.current) {
-                drawRotatedVideoFrame(ctx, rawVideo, 320, 180, rotationRef.current);
+                drawRotatedVideoFrame(ctx, rawVideo, cw, ch, rotationRef.current);
                 scheduleFrame();
               }
             });
           } else {
             requestAnimationFrame(() => {
               if (renderLoopActiveRef.current) {
-                drawRotatedVideoFrame(ctx, rawVideo, 320, 180, rotationRef.current);
+                drawRotatedVideoFrame(ctx, rawVideo, cw, ch, rotationRef.current);
                 scheduleFrame();
               }
             });
@@ -184,11 +320,11 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
         };
         scheduleFrame();
 
-        // Capture live video stream from canvas at 30fps with physically rotated pixels
+        // Capture live high-definition video stream from canvas at 30fps with physically rotated pixels
         const canvasStream = canvas.captureStream(30);
         const processedVideoTrack = canvasStream.getVideoTracks()[0];
 
-        // Combine microphone audio with processed rotated video track for WebRTC broadcast
+        // Combine microphone audio with processed high-def video track for WebRTC broadcast
         const broadcastStream = new MediaStream([
           ...stream.getAudioTracks(),
           processedVideoTrack,
@@ -210,9 +346,135 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
     }
   }, []);
 
-  // 2. Connect to Rust SFU and negotiate WebRTC session
+  // 2. Screen Sharing Pipeline
+  const stopScreenShare = useCallback(() => {
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((t) => {
+        try { t.stop(); } catch {}
+      });
+      screenStreamRef.current = null;
+    }
+    setScreenStream(null);
+    setIsScreenSharing(false);
+
+    if (screenSenderRef.current) {
+      try {
+        screenSenderRef.current.replaceTrack(null);
+      } catch (e) {
+        console.warn('[WebRTC Publisher] Failed to clear screen sender track:', e);
+      }
+    }
+
+    if (screenAudioTrackRef.current) {
+      try { screenAudioTrackRef.current.stop(); } catch {}
+      screenAudioTrackRef.current = null;
+      setupAudioMixer();
+    }
+
+    // Notify SFU of track update
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'tracks_update',
+          peerId: peerIdRef.current,
+          audio: true,
+          video: !isVideoDisabled,
+          screen: false,
+        })
+      );
+    }
+  }, [isVideoDisabled, setupAudioMixer]);
+
+  const startScreenShare = useCallback(async () => {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      const err = 'Screen sharing is not supported in this browser.';
+      console.error(err);
+      setRtcError(err);
+      return null;
+    }
+
+    try {
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          cursor: 'always',
+          displaySurface: 'monitor',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30, max: 60 },
+        },
+        audio: true, // Request system/tab audio if available
+      });
+
+      screenStreamRef.current = displayStream;
+      setScreenStream(displayStream);
+      setIsScreenSharing(true);
+
+      const screenVideoTrack = displayStream.getVideoTracks()[0];
+      if (screenVideoTrack) {
+        // Native browser "Stop sharing" button clicked by user
+        screenVideoTrack.onended = () => {
+          console.log('[WebRTC Publisher] Native screen sharing stopped by user');
+          stopScreenShare();
+          onScreenShareEndedRef.current?.();
+        };
+
+        // Attach screen track to existing WebRTC screen sender without full renegotiation
+        if (screenSenderRef.current) {
+          await screenSenderRef.current.replaceTrack(screenVideoTrack);
+          console.log('[WebRTC Publisher] Screen video track attached to WebRTC sender');
+        }
+      }
+
+      // Check if screen audio was captured
+      const screenAudioTracks = displayStream.getAudioTracks();
+      if (screenAudioTracks.length > 0) {
+        screenAudioTrackRef.current = screenAudioTracks[0];
+        screenAudioTracks[0].onended = () => {
+          screenAudioTrackRef.current = null;
+          setupAudioMixer();
+        };
+        setupAudioMixer();
+      }
+
+      // Notify SFU of active screen track
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'tracks_update',
+            peerId: peerIdRef.current,
+            audio: true,
+            video: !isVideoDisabled,
+            screen: true,
+          })
+        );
+      }
+
+      return displayStream;
+    } catch (err) {
+      if (err.name === 'NotAllowedError') {
+        console.log('[WebRTC Publisher] Screen share selection cancelled by user');
+      } else {
+        console.error('[WebRTC Publisher] Failed to acquire display media:', err);
+        setRtcError(err.message || 'Failed to start screen share');
+      }
+      return null;
+    }
+  }, [isVideoDisabled, setupAudioMixer, stopScreenShare]);
+
+  const toggleScreenShare = useCallback(() => {
+    if (isScreenSharing) {
+      stopScreenShare();
+    } else {
+      startScreenShare();
+    }
+  }, [isScreenSharing, startScreenShare, stopScreenShare]);
+
+  // 3. Connect to Rust SFU and negotiate WebRTC session
   const connectSFU = useCallback((stream) => {
     if (!stream || isCleaningUpRef.current) return;
+
+    // Fresh peerId for each new RTCPeerConnection to ensure a fresh session and handshake in SFU
+    peerIdRef.current = `pub-${Math.random().toString(36).substring(2, 9)}`;
 
     if (pcRef.current) {
       try { pcRef.current.close(); } catch {}
@@ -228,7 +490,7 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log(`[WebRTC Publisher] Connected to SFU signaling at ${sfuUrl}`);
+      console.log(`[WebRTC Publisher] Connected to SFU signaling at ${sfuUrl} (${peerIdRef.current})`);
       ws.send(
         JSON.stringify({
           type: 'join',
@@ -252,11 +514,10 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
         const msg = JSON.parse(event.data);
         switch (msg.type) {
           case 'pong':
-            // Heartbeat acknowledged by SFU
             break;
 
           case 'joined': {
-            console.log(`[WebRTC Publisher] Registered in room ${roomId} as Publisher`);
+            console.log(`[WebRTC Publisher] Registered in room ${roomId} as Publisher (${peerIdRef.current})`);
             await createAndSendOffer();
             break;
           }
@@ -317,10 +578,33 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
       });
       pcRef.current = pc;
 
-      // Add local media tracks to the peer connection
-      stream.getTracks().forEach((track) => {
-        pc.addTrack(track, stream);
+      // 1. Audio Transceiver
+      const audioTrack = stream.getAudioTracks()[0] || null;
+      const audioTransceiver = pc.addTransceiver(audioTrack || 'audio', {
+        direction: 'sendonly',
+        streams: [stream],
       });
+      audioSenderRef.current = audioTransceiver.sender;
+
+      // 2. Camera Video Transceiver (Standard sendonly transceiver)
+      const videoTrack = stream.getVideoTracks()[0] || null;
+      const cameraTransceiver = pc.addTransceiver(videoTrack || 'video', {
+        direction: 'sendonly',
+        streams: [stream],
+      });
+      videoSenderRef.current = cameraTransceiver.sender;
+
+      // 3. Screen Video Transceiver (Full Resolution)
+      const currentScreenTrack = screenStreamRef.current?.getVideoTracks()?.[0] || null;
+      const screenTransceiver = pc.addTransceiver(currentScreenTrack || 'video', {
+        direction: 'sendonly',
+      });
+      screenSenderRef.current = screenTransceiver.sender;
+      if (currentScreenTrack) {
+        try {
+          await screenTransceiver.sender.replaceTrack(currentScreenTrack);
+        } catch {}
+      }
 
       // Trickle ICE candidates to SFU
       pc.onicecandidate = (e) => {
@@ -345,6 +629,7 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
         if (state === 'connected') {
           setIsRtcConnected(true);
           setRtcError(null);
+          updateVideoEncodingParameters(activeShareModeRef.current);
         } else if (state === 'disconnected' || state === 'failed') {
           setIsRtcConnected(false);
         }
@@ -360,7 +645,6 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
         }
       };
 
-      // Create offer with sendonly audio and video (never receive media loopback on WritePage)
       const offer = await pc.createOffer({
         offerToReceiveAudio: false,
         offerToReceiveVideo: false,
@@ -373,6 +657,11 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
             type: 'offer',
             peerId: peerIdRef.current,
             sdp: offer.sdp,
+            tracks: {
+              audioMid: audioTransceiver.mid || '0',
+              videoMid: cameraTransceiver.mid || '1',
+              screenMid: screenTransceiver.mid || '2',
+            },
           })
         );
       }
@@ -409,6 +698,18 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
         localStreamRef.current.getTracks().forEach((t) => t.stop());
         localStreamRef.current = null;
       }
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach((t) => t.stop());
+        screenStreamRef.current = null;
+      }
+      if (screenAudioTrackRef.current) {
+        screenAudioTrackRef.current.stop();
+        screenAudioTrackRef.current = null;
+      }
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {});
+        audioCtxRef.current = null;
+      }
       canvasRef.current = null;
 
       if (pcRef.current) {
@@ -433,7 +734,7 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
     };
   }, [roomId, autoStart, acquireMedia, connectSFU]);
 
-  // Stop device tracks on page unload or component unmount
+  // Stop device tracks on page unload
   useEffect(() => {
     const handleUnload = () => {
       renderLoopActiveRef.current = false;
@@ -442,6 +743,9 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
       }
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((t) => t.stop());
+      }
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach((t) => t.stop());
       }
     };
     window.addEventListener('beforeunload', handleUnload);
@@ -465,12 +769,8 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
           track.enabled = !willBeMuted;
         });
       }
-      if (pcRef.current) {
-        pcRef.current.getSenders().forEach((s) => {
-          if (s.track && s.track.kind === 'audio') {
-            s.track.enabled = !willBeMuted;
-          }
-        });
+      if (audioSenderRef.current?.track) {
+        audioSenderRef.current.track.enabled = !willBeMuted;
       }
       return willBeMuted;
     });
@@ -491,12 +791,8 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
           track.enabled = !willBeDisabled;
         });
       }
-      if (pcRef.current) {
-        pcRef.current.getSenders().forEach((s) => {
-          if (s.track && s.track.kind === 'video') {
-            s.track.enabled = !willBeDisabled;
-          }
-        });
+      if (videoSenderRef.current?.track) {
+        videoSenderRef.current.track.enabled = !willBeDisabled;
       }
       return willBeDisabled;
     });
@@ -527,6 +823,11 @@ export function useWebRTCStreamer({ roomId = 'default', autoStart = true } = {})
 
   return {
     localStream,
+    screenStream,
+    isScreenSharing,
+    startScreenShare,
+    stopScreenShare,
+    toggleScreenShare,
     isMicMuted,
     isVideoDisabled,
     isRtcConnected,

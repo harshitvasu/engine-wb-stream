@@ -21,14 +21,24 @@ A high-performance real-time collaborative streaming platform featuring:
 
 ### 3. Custom Rust WebRTC Selective Forwarding Unit (SFU)
 - **Standalone Rust Service (`webrtc-sfu/`):** Built with `str0m 0.24` (Sans-I/O WebRTC stack) and `tokio`.
-- **Media Engine & Forwarding:**
-  - Ingests encoded **Opus** audio and **VP8** thumbnail video from the broadcaster.
+- **Media Engine & Multi-Track Forwarding:**
+  - Ingests encoded **Opus** audio, **VP8** full-resolution camera video, and **VP8** full-resolution screen share video directly from the broadcaster.
   - Forwarded without decoding or re-encoding across independent DTLS-SRTP sessions to all connected subscribers in the room.
-  - Generates RTCP Picture Loss Indication (PLI) feedback to request immediate IDR keyframes when viewers join late.
+  - Generates RTCP Picture Loss Indication (PLI) feedback to request immediate IDR keyframes for video and screen tracks when viewers join or switch views.
+- **Screen Sharing (`ScreenShareView.jsx`):**
+  - Broadcaster can share screen/window/tab (`getDisplayMedia`) at Full Resolution (1080p+ @ up to 60fps) over the WebRTC SFU.
+  - Web Audio mixer captures and combines system/tab audio with presenter microphone speech into a single synchronized Opus audio stream.
+  - Viewers experience high-clarity screen sharing with zero distortion, crisp typography, and full-screen expansion.
+- **Full Resolution Video Sharing (`FullVideoView.jsx`):**
+  - Unconstrained high-definition camera video (1080p / 720p HD) transmitted over WebRTC SFU for live speaker/webinar presentations.
+  - Hardware-accelerated pixel-level rotation support (90°, 180°, 270°, 360°) preserved in high resolution.
+- **Multi-Mode Stream Presentation & Switching:**
+  - Broadcaster can switch presentation modes with one click: **Whiteboard**, **Screen Share**, or **Full Video**.
+  - Room state synchronization notifies all viewers in real-time (`share_mode`).
+  - Viewers automatically follow the presenter by default (`Follow Presenter`), or can independently toggle between Whiteboard, Screen Share, and Full Video views.
 - **Live Video Thumbnail (`PublisherVideoThumbnail.jsx`):**
-  - Displays a crisp, low-overhead 320×180 @ 15fps camera thumbnail inside a floating, collapsible overlay.
-  - Does not alter, distort, or break Excalidraw's 16:9 canvas layout.
-  - Broadcaster controls: Mute/Unmute microphone, Enable/Disable camera independently.
+  - Displays presenter camera inside a floating, collapsible overlay during Whiteboard and Screen Share modes.
+  - Broadcaster controls: Mute/Unmute microphone, Enable/Disable camera, Quick Screen Share toggle, Video Rotation.
   - Viewer controls: Mute/Unmute audio, volume slider, video refresh (keyframe request), and minimize/expand.
 - **Dedicated Signaling Channel:** WebSocket signaling on port `3088` (proxied in development through Vite at `/rtc-ws`).
 

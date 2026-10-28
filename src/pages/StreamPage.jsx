@@ -6,6 +6,8 @@ import { TopToolbar } from '../components/TopToolbar';
 import { WhiteboardFrame } from '../components/WhiteboardFrame';
 import { StreamControlsPanel } from '../components/StreamControlsPanel';
 import { PublisherVideoThumbnail } from '../components/PublisherVideoThumbnail';
+import { ScreenShareView } from '../components/ScreenShareView';
+import { FullVideoView } from '../components/FullVideoView';
 import { useWhiteboardViewer } from '../hooks/useWhiteboardViewer';
 import { useWebRTCViewer } from '../hooks/useWebRTCViewer';
 import { MIN_VIEWER_ZOOM } from '../config/constants';
@@ -54,13 +56,18 @@ export function StreamPage() {
     setProfile,
     flushManualBuffer,
     resetControlsToDefaults,
+    activeShareMode,
+    videoRotation,
   } = useWhiteboardViewer({ roomId: 'default' });
 
   const {
+    cameraStream,
+    screenStream,
     remoteStream,
     isRtcConnected,
     hasAudioTrack,
     hasVideoTrack,
+    hasScreenTrack,
     isAudioMuted,
     volume,
     rtcError,
@@ -73,6 +80,9 @@ export function StreamPage() {
   // Default load in fullscreen mode as requested (R2)
   const [isFullscreen, setIsFullscreen] = useState(true);
   const containerRef = useRef(null);
+
+  // Broadcaster dictates the active view mode (no viewer control / override)
+  const currentViewMode = activeShareMode || 'whiteboard';
 
   const toggleControls = useCallback(() => {
     setIsControlsOpen((prev) => !prev);
@@ -134,12 +144,10 @@ export function StreamPage() {
       else if (document.msExitFullscreen) document.msExitFullscreen();
       setIsFullscreen(false);
     } else if (isFullscreen) {
-      // Fallback CSS fullscreen exit
       setIsFullscreen(false);
     } else if (el) {
       if (el.requestFullscreen) {
         el.requestFullscreen().catch(() => {
-          // Native fullscreen failed (common on iOS Safari) -> use bulletproof CSS fullscreen
           setIsFullscreen(true);
         });
       } else if (el.webkitRequestFullscreen) {
@@ -147,7 +155,6 @@ export function StreamPage() {
       } else if (el.msRequestFullscreen) {
         el.msRequestFullscreen();
       } else {
-        // iOS Safari and mobile browsers without Fullscreen API
         setIsFullscreen(true);
       }
     }
@@ -179,7 +186,7 @@ export function StreamPage() {
 
   return (
     <div className={`page-layout ${isFullscreen ? 'stream-fullscreen' : ''}`} ref={containerRef}>
-      {/* 1. Single Unified Top Toolbar (Contains all stream navigation, telemetry, and actions) */}
+      {/* 1. Single Unified Top Toolbar (Displays broadcaster live mode with no viewer controls) */}
       <TopToolbar
         isConnected={isConnected}
         viewersCount={metrics.viewersCount}
@@ -192,10 +199,40 @@ export function StreamPage() {
         isControlsOpen={isControlsOpen}
         metrics={metrics}
         broadcasterOnline={broadcasterOnline}
+        currentViewMode={currentViewMode}
+        hasScreenTrack={hasScreenTrack}
+        hasVideoTrack={hasVideoTrack}
       />
 
-      {/* 2. Whiteboard Canvas (Zero re-renders; covers screen all the way down to bottom) */}
-      <MemoizedStreamCanvas onMount={setExcalidrawAPI} isFullscreen={isFullscreen} />
+      {/* 2. Main Stage: Whiteboard Canvas, Screen Share View, or Full Video View */}
+      {currentViewMode === 'screen' ? (
+        <ScreenShareView
+          stream={screenStream}
+          isLive={hasScreenTrack}
+          isFullscreen={isFullscreen}
+          onToggleFullscreen={toggleFullscreen}
+          onRequestKeyframe={() => requestKeyframe('screen')}
+          isMuted={isAudioMuted}
+          volume={volume}
+          isPublisher={false}
+        />
+      ) : currentViewMode === 'video' ? (
+        <FullVideoView
+          stream={cameraStream || remoteStream}
+          isLive={hasVideoTrack}
+          isFullscreen={isFullscreen}
+          onToggleFullscreen={toggleFullscreen}
+          onRequestKeyframe={() => requestKeyframe('video')}
+          isMuted={isAudioMuted}
+          onToggleMute={toggleAudioMute}
+          volume={volume}
+          onVolumeChange={setVolume}
+          rotation={videoRotation}
+          isPublisher={false}
+        />
+      ) : (
+        <MemoizedStreamCanvas onMount={setExcalidrawAPI} isFullscreen={isFullscreen} />
+      )}
 
       {/* 3. Collapsible Stream Controls Panel */}
       <StreamControlsPanel
@@ -223,20 +260,22 @@ export function StreamPage() {
         </button>
       )}
 
-      {/* Floating WebRTC Viewer Audio/Video Thumbnail */}
-      <PublisherVideoThumbnail
-        stream={remoteStream}
-        isPublisher={false}
-        isConnected={isRtcConnected}
-        hasAudioTrack={hasAudioTrack}
-        hasVideoTrack={hasVideoTrack}
-        isAudioMuted={isAudioMuted}
-        onToggleAudioMute={toggleAudioMute}
-        volume={volume}
-        onVolumeChange={setVolume}
-        onRequestKeyframe={requestKeyframe}
-        error={rtcError}
-      />
+      {/* Floating WebRTC Presenter Audio/Video Thumbnail (Always available in Whiteboard and Screen modes) */}
+      {currentViewMode !== 'video' && (
+        <PublisherVideoThumbnail
+          stream={cameraStream || remoteStream}
+          isPublisher={false}
+          isConnected={isRtcConnected}
+          hasAudioTrack={hasAudioTrack}
+          hasVideoTrack={hasVideoTrack}
+          isAudioMuted={isAudioMuted}
+          onToggleAudioMute={toggleAudioMute}
+          volume={volume}
+          onVolumeChange={setVolume}
+          onRequestKeyframe={() => requestKeyframe('video')}
+          error={rtcError}
+        />
+      )}
     </div>
   );
 }

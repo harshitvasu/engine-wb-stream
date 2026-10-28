@@ -4,17 +4,20 @@ import { getSfuWebSocketUrl } from '../config/constants';
 /**
  * Custom hook for Viewers / Subscribers to:
  * - Establish an encrypted WebRTC PeerConnection with the custom Rust SFU
- * - Receive live Opus audio and VP8 video thumbnail tracks
+ * - Receive live Opus audio, full resolution VP8 camera video, and full resolution VP8 screen share tracks
  * - Maintain periodic signaling heartbeats (5s ping) to prevent mobile Wi-Fi / Safari idle drops
  * - Resiliently handle signaling drops without interrupting live UDP media playback
- * - Request keyframes (PLI) upon join so video starts decoding without delay
+ * - Request keyframes (PLI) for video and screen so decoding starts without delay
  * - Control audio mute, volume, and handle reconnects
  */
 export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
-  const [remoteStream, setRemoteStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null); // Combined/camera stream for backward compatibility
+  const [cameraStream, setCameraStream] = useState(null); // Full-resolution Presenter Camera
+  const [screenStream, setScreenStream] = useState(null); // Full-resolution Shared Screen
   const [isRtcConnected, setIsRtcConnected] = useState(false);
   const [hasAudioTrack, setHasAudioTrack] = useState(false);
   const [hasVideoTrack, setHasVideoTrack] = useState(false);
+  const [hasScreenTrack, setHasScreenTrack] = useState(false);
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [volume, setVolumeState] = useState(1.0);
   const [rtcError, setRtcError] = useState(null);
@@ -22,17 +25,27 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
   const pcRef = useRef(null);
   const wsRef = useRef(null);
   const peerIdRef = useRef(`sub-${Math.random().toString(36).substring(2, 9)}`);
-  const incomingStreamRef = useRef(null);
+
+  const cameraTransceiverRef = useRef(null);
+  const screenTransceiverRef = useRef(null);
+  const cameraTransceiverMidRef = useRef(null);
+  const screenTransceiverMidRef = useRef(null);
+
+  const audioStreamRef = useRef(new MediaStream());
+  const cameraStreamRef = useRef(new MediaStream());
+  const screenStreamRef = useRef(new MediaStream());
+
   const reconnectTimeoutRef = useRef(null);
   const pingIntervalRef = useRef(null);
   const isCleaningUpRef = useRef(false);
 
-  const requestKeyframe = useCallback(() => {
+  const requestKeyframe = useCallback((kind = 'all') => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: 'request_keyframe',
           peerId: peerIdRef.current,
+          kind: typeof kind === 'string' ? kind : 'all',
         })
       );
     }
@@ -80,7 +93,6 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
         const msg = JSON.parse(event.data);
         switch (msg.type) {
           case 'pong':
-            // Heartbeat acknowledged by SFU
             break;
 
           case 'joined': {
@@ -95,9 +107,9 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
               await pcRef.current.setRemoteDescription(
                 new RTCSessionDescription({ type: 'answer', sdp: msg.sdp })
               );
-              // Request keyframe so video decoder locks onto an IDR frame immediately
-              requestKeyframe();
-              setTimeout(requestKeyframe, 800);
+              // Request keyframes so video and screen decoders lock onto IDR frames immediately
+              requestKeyframe('all');
+              setTimeout(() => requestKeyframe('all'), 800);
             }
             break;
           }
@@ -111,9 +123,17 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
 
           case 'tracks_available': {
             console.log('[WebRTC Subscriber] Tracks available notification from SFU:', msg);
+            if (typeof msg.audio === 'boolean') setHasAudioTrack(msg.audio);
+            if (typeof msg.video === 'boolean') setHasVideoTrack(msg.video);
+            if (typeof msg.screen === 'boolean') setHasScreenTrack(msg.screen);
+
             if (msg.video) {
-              requestKeyframe();
-              setTimeout(requestKeyframe, 800);
+              requestKeyframe('video');
+              setTimeout(() => requestKeyframe('video'), 800);
+            }
+            if (msg.screen) {
+              requestKeyframe('screen');
+              setTimeout(() => requestKeyframe('screen'), 800);
             }
             break;
           }
@@ -122,6 +142,7 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
             console.log('[WebRTC Subscriber] Publisher disconnected');
             setHasAudioTrack(false);
             setHasVideoTrack(false);
+            setHasScreenTrack(false);
             break;
           }
 
@@ -148,8 +169,6 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = setTimeout(() => {
           if (!isCleaningUpRef.current) {
-            // If WebRTC is currently connected and active, only reconnect the signaling channel!
-            // Do NOT tear down the active UDP audio/video media stream.
             const pc = pcRef.current;
             const isPeerActive = pc && (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected');
             if (isPeerActive) {
@@ -189,11 +208,16 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
       reconnectWs.onmessage = async (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'tracks_available' && msg.video) {
-            requestKeyframe();
+          if (msg.type === 'tracks_available') {
+            if (typeof msg.audio === 'boolean') setHasAudioTrack(msg.audio);
+            if (typeof msg.video === 'boolean') setHasVideoTrack(msg.video);
+            if (typeof msg.screen === 'boolean') setHasScreenTrack(msg.screen);
+            if (msg.video) requestKeyframe('video');
+            if (msg.screen) requestKeyframe('screen');
           } else if (msg.type === 'peer_disconnected') {
             setHasAudioTrack(false);
             setHasVideoTrack(false);
+            setHasScreenTrack(false);
           }
         } catch {}
       };
@@ -227,41 +251,83 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
       });
       pcRef.current = pc;
 
-      const incomingStream = new MediaStream();
-      incomingStreamRef.current = incomingStream;
-      setRemoteStream(incomingStream);
+      // 1. Audio Transceiver (recvonly)
+      const audioTransceiver = pc.addTransceiver('audio', { direction: 'recvonly' });
 
-      // Add receive-only transceivers bundled into the exact same MediaStream instance
-      pc.addTransceiver('audio', { direction: 'recvonly', streams: [incomingStream] });
-      pc.addTransceiver('video', { direction: 'recvonly', streams: [incomingStream] });
+      // 2. Camera Video Transceiver (recvonly) - Full Resolution Camera
+      const cameraTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
+      cameraTransceiverRef.current = cameraTransceiver;
+
+      // 3. Screen Video Transceiver (recvonly) - Full Resolution Screen Sharing
+      const screenTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
+      screenTransceiverRef.current = screenTransceiver;
 
       pc.ontrack = (e) => {
-        console.log(`[WebRTC Subscriber] Inbound track received: kind=${e.track.kind}, id=${e.track.id}`);
-        const stream = incomingStreamRef.current || incomingStream;
-        if (!stream.getTracks().some((t) => t.id === e.track.id)) {
-          stream.addTrack(e.track);
-        }
-        if (e.streams && e.streams[0]) {
-          e.streams[0].getTracks().forEach((track) => {
-            if (!stream.getTracks().some((t) => t.id === track.id)) {
-              stream.addTrack(track);
-            }
+        const kind = e.track.kind;
+        const mid = e.transceiver?.mid;
+        console.log(`[WebRTC Subscriber] Inbound track: kind=${kind}, mid=${mid}, id=${e.track.id}`);
+
+        if (kind === 'audio') {
+          audioStreamRef.current.getTracks().forEach((t) => {
+            if (t.id !== e.track.id) audioStreamRef.current.removeTrack(t);
           });
-        }
-        setRemoteStream(stream);
-
-        if (e.track.kind === 'audio') {
+          audioStreamRef.current.addTrack(e.track);
           setHasAudioTrack(true);
-        } else if (e.track.kind === 'video') {
-          setHasVideoTrack(true);
-          requestKeyframe();
-          setTimeout(requestKeyframe, 800);
-        }
 
-        e.track.onended = () => {
-          if (e.track.kind === 'audio') setHasAudioTrack(false);
-          if (e.track.kind === 'video') setHasVideoTrack(false);
-        };
+          // Update existing video streams with new audio track for synchronous lip-sync
+          if (cameraStreamRef.current) {
+            const videoTr = cameraStreamRef.current.getVideoTracks()[0];
+            if (videoTr) {
+              const updatedCam = new MediaStream([videoTr, e.track]);
+              setCameraStream(updatedCam);
+              setRemoteStream(updatedCam);
+            }
+          }
+          if (screenStreamRef.current) {
+            const screenTr = screenStreamRef.current.getVideoTracks()[0];
+            if (screenTr) {
+              setScreenStream(new MediaStream([screenTr, e.track]));
+            }
+          }
+        } else if (kind === 'video') {
+          const isCamMid = mid && mid === cameraTransceiverMidRef.current;
+          const isScrMid = mid && mid === screenTransceiverMidRef.current;
+          const isCamTransceiver = e.transceiver === cameraTransceiverRef.current;
+
+          const isCamera = isCamMid || isCamTransceiver || (!isScrMid && !cameraStreamRef.current.getVideoTracks().length);
+
+          const audioTracks = audioStreamRef.current.getAudioTracks();
+
+          if (isCamera) {
+            console.log('[WebRTC Subscriber] Attached to cameraStream');
+            cameraStreamRef.current.getTracks().forEach((t) => {
+              if (t.id !== e.track.id) cameraStreamRef.current.removeTrack(t);
+            });
+            cameraStreamRef.current.addTrack(e.track);
+            const combinedCam = new MediaStream([e.track, ...audioTracks]);
+            setCameraStream(combinedCam);
+            setRemoteStream(combinedCam);
+            setHasVideoTrack(true);
+            requestKeyframe('video');
+            setTimeout(() => requestKeyframe('video'), 800);
+          } else {
+            console.log('[WebRTC Subscriber] Attached to screenStream');
+            screenStreamRef.current.getTracks().forEach((t) => {
+              if (t.id !== e.track.id) screenStreamRef.current.removeTrack(t);
+            });
+            screenStreamRef.current.addTrack(e.track);
+            const combinedScr = new MediaStream([e.track, ...audioTracks]);
+            setScreenStream(combinedScr);
+            setHasScreenTrack(true);
+            requestKeyframe('screen');
+            setTimeout(() => requestKeyframe('screen'), 800);
+          }
+
+          e.track.onended = () => {
+            if (isCamera) setHasVideoTrack(false);
+            else setHasScreenTrack(false);
+          };
+        }
       };
 
       pc.onicecandidate = (e) => {
@@ -286,8 +352,8 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
         if (state === 'connected') {
           setIsRtcConnected(true);
           setRtcError(null);
-          requestKeyframe();
-          setTimeout(requestKeyframe, 1000);
+          requestKeyframe('all');
+          setTimeout(() => requestKeyframe('all'), 1000);
         } else if (state === 'disconnected' || state === 'failed') {
           setIsRtcConnected(false);
         }
@@ -306,12 +372,20 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      cameraTransceiverMidRef.current = cameraTransceiver.mid || '1';
+      screenTransceiverMidRef.current = screenTransceiver.mid || '2';
+
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(
           JSON.stringify({
             type: 'offer',
             peerId: peerIdRef.current,
             sdp: offer.sdp,
+            tracks: {
+              audioMid: audioTransceiver.mid || '0',
+              videoMid: cameraTransceiver.mid || '1',
+              screenMid: screenTransceiver.mid || '2',
+            },
           })
         );
       }
@@ -360,10 +434,13 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
   }, []);
 
   return {
-    remoteStream,
+    remoteStream, // Backward-compat fallback (camera)
+    cameraStream, // Full Resolution Presenter Camera
+    screenStream, // Full Resolution Screen Share
     isRtcConnected,
     hasAudioTrack,
     hasVideoTrack,
+    hasScreenTrack,
     isAudioMuted,
     volume,
     rtcError,

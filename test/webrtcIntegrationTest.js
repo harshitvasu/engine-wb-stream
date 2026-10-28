@@ -70,14 +70,14 @@ async function runTest() {
   }
   console.log(`✓ Rust SFU signaling operational: joined ${testRoomId} as ${joinedMsg.role}`);
 
-  // 3. Verify SDP offer/answer negotiation with mock offer
-  console.log('\n3. Testing SDP Offer/Answer with Rust SFU...');
+  // 3. Verify SDP offer/answer negotiation with 3 tracks (Audio, Video, Screen)
+  console.log('\n3. Testing 3-Track SDP Offer/Answer (Audio + Video + Screen) with Rust SFU...');
   const mockOfferSdp = [
     'v=0',
     'o=- 123456789 2 IN IP4 127.0.0.1',
     's=-',
     't=0 0',
-    'a=group:BUNDLE 0 1',
+    'a=group:BUNDLE 0 1 2',
     'm=audio 9 UDP/TLS/RTP/SAVPF 111',
     'c=IN IP4 0.0.0.0',
     'a=mid:0',
@@ -97,6 +97,16 @@ async function runTest() {
     'a=setup:actpass',
     'a=ice-ufrag:abcd',
     'a=ice-pwd:abcdefghijklmnop',
+    'm=video 9 UDP/TLS/RTP/SAVPF 96',
+    'c=IN IP4 0.0.0.0',
+    'a=mid:2',
+    'a=sendonly',
+    'a=rtpmap:96 VP8/90000',
+    'a=rtcp-fb:96 nack pli',
+    'a=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF',
+    'a=setup:actpass',
+    'a=ice-ufrag:abcd',
+    'a=ice-pwd:abcdefghijklmnop',
     '',
   ].join('\r\n');
 
@@ -105,6 +115,11 @@ async function runTest() {
       type: 'offer',
       peerId: 'test-publisher-1',
       sdp: mockOfferSdp,
+      tracks: {
+        audioMid: '0',
+        videoMid: '1',
+        screenMid: '2',
+      },
     })
   );
   await sleep(150);
@@ -117,9 +132,9 @@ async function runTest() {
   if (!answerMsg.sdp.includes('a=recvonly')) {
     throw new Error('SDP answer did not negotiate receive-only tracks for publisher');
   }
-  console.log('✓ SFU correctly negotiated recvonly for inbound Opus audio & VP8 video tracks');
+  console.log('✓ SFU correctly negotiated recvonly for inbound Opus audio, Full-Res camera video, & Screen tracks');
 
-  // 4. Verify Subscriber join
+  // 4. Verify Subscriber join & multi-track notification
   console.log('\n4. Connecting subscriber to same room...');
   const subWs = new WebSocket(SFU_WS_URL);
   await new Promise((r) => subWs.on('open', r));
@@ -142,8 +157,40 @@ async function runTest() {
   }
   console.log(`✓ Subscriber joined room ${testRoomId}`);
 
+  const tracksAvailableMsg = subEvents.find((e) => e.type === 'tracks_available');
+  if (!tracksAvailableMsg || !tracksAvailableMsg.audio || !tracksAvailableMsg.video) {
+    throw new Error('Subscriber did not receive expected tracks_available notification');
+  }
+  console.log(`✓ Subscriber received tracks_available: audio=${tracksAvailableMsg.audio}, video=${tracksAvailableMsg.video}, screen=${tracksAvailableMsg.screen}`);
+
+  // 5. Verify Node.js Presentation Share Mode synchronization
+  console.log('\n5. Testing Node.js Presentation Share Mode broadcast...');
+  nodeWs.send(
+    JSON.stringify({
+      type: 'share_mode',
+      roomId: testRoomId,
+      activeShare: 'screen',
+    })
+  );
+  await sleep(150);
+
+  // Connect a 2nd Node.js client to verify it receives the activeShare in its snapshot
+  const viewerWs = new WebSocket(NODE_WS_URL);
+  await new Promise((resolve) => viewerWs.on('open', resolve));
+  const viewerEvents = [];
+  viewerWs.on('message', (data) => viewerEvents.push(JSON.parse(data.toString())));
+  viewerWs.send(JSON.stringify({ type: 'join', role: 'viewer', roomId: testRoomId }));
+  await sleep(150);
+
+  const viewerSnapshot = viewerEvents.find((e) => e.type === 'init' || e.type === 'snapshot');
+  if (!viewerSnapshot || viewerSnapshot.activeShare !== 'screen') {
+    throw new Error(`Viewer did not receive updated activeShare mode: expected 'screen', got '${viewerSnapshot?.activeShare}'`);
+  }
+  console.log(`✓ Node.js broadcasted and synced activeShare mode: '${viewerSnapshot.activeShare}'`);
+
   // Cleanup
   nodeWs.close();
+  viewerWs.close();
   sfuWs.close();
   subWs.close();
 

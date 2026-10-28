@@ -207,11 +207,11 @@ async fn handle_ws_connection(
                     }
                 }
 
-                ClientMessage::Offer { sdp, peer_id } => {
+                ClientMessage::Offer { sdp, peer_id, tracks } => {
                     let room_id = joined_room.clone().unwrap_or_else(|| "default".to_string());
                     let result = {
                         let mut mgr = manager.lock().await;
-                        mgr.handle_offer(&room_id, &peer_id, &sdp)
+                        mgr.handle_offer(&room_id, &peer_id, &sdp, tracks.as_ref())
                     };
 
                     match result {
@@ -247,15 +247,21 @@ async fn handle_ws_connection(
                     }
                 }
 
-                ClientMessage::RequestKeyframe { peer_id } => {
+                ClientMessage::RequestKeyframe { peer_id, kind } => {
                     let room_id = joined_room.clone().unwrap_or_else(|| "default".to_string());
                     let transmits = {
                         let mut mgr = manager.lock().await;
-                        mgr.request_keyframe(&room_id, &peer_id)
+                        mgr.request_keyframe(&room_id, &peer_id, kind.as_deref())
                     };
                     for t in transmits {
                         let _ = udp_socket.send_to(&t.contents, t.destination).await;
                     }
+                }
+
+                ClientMessage::TracksUpdate { peer_id, audio, video, screen } => {
+                    let room_id = joined_room.clone().unwrap_or_else(|| "default".to_string());
+                    let mut mgr = manager.lock().await;
+                    mgr.handle_tracks_update(&room_id, &peer_id, audio, video, screen);
                 }
 
                 ClientMessage::Leave { room_id, peer_id } => {

@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::media::MediaRouter;
 use crate::metrics::Metrics;
 use crate::peer::{PeerSession, Role};
-use crate::signaling::{CandidatePayload, ServerMessage};
+use crate::signaling::{CandidatePayload, ServerMessage, TrackMapping};
 
 pub struct Room {
     #[allow(dead_code)]
@@ -79,11 +79,16 @@ impl RoomManager {
         match role {
             Role::Publisher => {
                 if let Some(existing) = &mut room.publisher {
-                    if existing.peer_id == peer_id {
-                        info!("[Room {}] Publisher ({}) re-attached signaling channel", room_id, peer_id);
-                        existing.ws_sender = ws_sender;
-                        return Ok(role);
-                    } else if existing.is_connected {
+                    let is_same_peer = existing.peer_id == peer_id;
+                    let is_ws_dead = existing.ws_sender.is_none();
+                    if is_same_peer || is_ws_dead || !existing.is_connected {
+                        info!(
+                            "[Room {}] Replacing previous Publisher ({}) with fresh session ({})",
+                            room_id, existing.peer_id, peer_id
+                        );
+                        room.publisher = None;
+                        self.metrics.dec_publishers();
+                    } else {
                         return Err(anyhow::anyhow!(
                             "Publisher limit exceeded: an active publisher is already broadcasting in room '{}'",
                             room_id
@@ -99,6 +104,7 @@ impl RoomManager {
                     sub.send_signal(ServerMessage::TracksAvailable {
                         audio: true,
                         video: true,
+                        screen: false,
                     });
                 }
             }
@@ -110,6 +116,7 @@ impl RoomManager {
                         existing.send_signal(ServerMessage::TracksAvailable {
                             audio: pub_session.audio_mid.is_some(),
                             video: pub_session.video_mid.is_some(),
+                            screen: pub_session.screen_mid.is_some(),
                         });
                     }
                     return Ok(role);
@@ -127,12 +134,13 @@ impl RoomManager {
 
                 // If publisher exists, notify subscriber and request an immediate keyframe
                 if let Some(pub_session) = &mut room.publisher {
-                    pub_session.request_keyframe();
+                    pub_session.request_keyframe(None);
                     self.metrics.inc_keyframe_requests();
                     if let Some(sub) = room.subscribers.get(&peer_id) {
                         sub.send_signal(ServerMessage::TracksAvailable {
                             audio: pub_session.audio_mid.is_some(),
                             video: pub_session.video_mid.is_some(),
+                            screen: pub_session.screen_mid.is_some(),
                         });
                     }
                 }
@@ -147,6 +155,7 @@ impl RoomManager {
         room_id: &str,
         peer_id: &str,
         sdp: &str,
+        tracks: Option<&TrackMapping>,
     ) -> Result<(String, Vec<Transmit>), anyhow::Error> {
         let room = self
             .rooms
@@ -159,22 +168,24 @@ impl RoomManager {
 
         let answer_sdp = if let Some(pub_session) = &mut room.publisher {
             if pub_session.peer_id == peer_id {
-                let answer = pub_session.handle_offer(sdp)?;
+                let answer = pub_session.handle_offer(sdp, tracks)?;
                 pub_session.drain_outputs(&mut transmits, &mut frames, &mut keyframe_requested);
                 let has_audio = pub_session.audio_mid.is_some();
                 let has_video = pub_session.video_mid.is_some();
+                let has_screen = pub_session.screen_mid.is_some();
                 for sub in room.subscribers.values() {
                     sub.send_signal(ServerMessage::TracksAvailable {
                         audio: has_audio,
                         video: has_video,
+                        screen: has_screen,
                     });
                 }
                 answer
             } else if let Some(sub_session) = room.subscribers.get_mut(peer_id) {
-                let answer = sub_session.handle_offer(sdp)?;
+                let answer = sub_session.handle_offer(sdp, tracks)?;
                 sub_session.drain_outputs(&mut transmits, &mut frames, &mut keyframe_requested);
                 // Also trigger keyframe on publisher for the new subscriber and drain transmits
-                pub_session.request_keyframe();
+                pub_session.request_keyframe(None);
                 let mut pub_frames = Vec::new();
                 let mut pub_kf = false;
                 pub_session.drain_outputs(&mut transmits, &mut pub_frames, &mut pub_kf);
@@ -183,7 +194,7 @@ impl RoomManager {
                 return Err(anyhow::anyhow!("Peer not found: {}", peer_id));
             }
         } else if let Some(sub_session) = room.subscribers.get_mut(peer_id) {
-            let answer = sub_session.handle_offer(sdp)?;
+            let answer = sub_session.handle_offer(sdp, tracks)?;
             sub_session.drain_outputs(&mut transmits, &mut frames, &mut keyframe_requested);
             answer
         } else {
@@ -227,11 +238,11 @@ impl RoomManager {
         Err(anyhow::anyhow!("Peer not found: {}", peer_id))
     }
 
-    pub fn request_keyframe(&mut self, room_id: &str, _peer_id: &str) -> Vec<Transmit> {
+    pub fn request_keyframe(&mut self, room_id: &str, _peer_id: &str, kind: Option<&str>) -> Vec<Transmit> {
         let mut transmits = Vec::new();
         if let Some(room) = self.rooms.get_mut(room_id) {
             if let Some(pub_session) = &mut room.publisher {
-                pub_session.request_keyframe();
+                pub_session.request_keyframe(kind);
                 self.metrics.inc_keyframe_requests();
                 let mut frames = Vec::new();
                 let mut kf = false;
@@ -239,6 +250,29 @@ impl RoomManager {
             }
         }
         transmits
+    }
+
+    pub fn handle_tracks_update(
+        &mut self,
+        room_id: &str,
+        peer_id: &str,
+        audio: bool,
+        video: bool,
+        screen: bool,
+    ) {
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            if let Some(pub_session) = &room.publisher {
+                if pub_session.peer_id == peer_id {
+                    for sub in room.subscribers.values() {
+                        sub.send_signal(ServerMessage::TracksAvailable {
+                            audio,
+                            video,
+                            screen,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     /// Ingests an incoming raw UDP media/ICE packet and attributes it to the matching peer session
@@ -307,6 +341,7 @@ impl RoomManager {
 
                         let pub_audio = pub_session.audio_mid;
                         let pub_video = pub_session.video_mid;
+                        let pub_screen = pub_session.screen_mid;
 
                         // Forward media frames to subscribers
                         for frame in &frames {
@@ -314,6 +349,7 @@ impl RoomManager {
                                 frame,
                                 pub_audio,
                                 pub_video,
+                                pub_screen,
                                 &mut room.subscribers,
                                 &self.metrics,
                                 transmits,
@@ -350,7 +386,7 @@ impl RoomManager {
 
                         if keyframe_requested {
                             if let Some(pub_session) = &mut room.publisher {
-                                pub_session.request_keyframe();
+                                pub_session.request_keyframe(None);
                                 self.metrics.inc_keyframe_requests();
                                 let mut pub_frames = Vec::new();
                                 let mut pub_kf = false;
@@ -369,10 +405,12 @@ impl RoomManager {
             let mut frames = Vec::new();
             let mut pub_audio = None;
             let mut pub_video = None;
+            let mut pub_screen = None;
 
             if let Some(pub_session) = &mut room.publisher {
                 pub_audio = pub_session.audio_mid;
                 pub_video = pub_session.video_mid;
+                pub_screen = pub_session.screen_mid;
 
                 if now >= pub_session.next_timeout {
                     let _ = pub_session.rtc.handle_input(Input::Timeout(now));
@@ -387,6 +425,7 @@ impl RoomManager {
                     frame,
                     pub_audio,
                     pub_video,
+                    pub_screen,
                     &mut room.subscribers,
                     &self.metrics,
                     transmits,
@@ -401,7 +440,7 @@ impl RoomManager {
                     sub_session.drain_outputs(transmits, &mut dummy_frames, &mut keyframe_requested);
                     if keyframe_requested {
                         if let Some(pub_session) = &mut room.publisher {
-                            pub_session.request_keyframe();
+                            pub_session.request_keyframe(None);
                             self.metrics.inc_keyframe_requests();
                             let mut pub_frames = Vec::new();
                             let mut pub_kf = false;
@@ -457,6 +496,7 @@ impl RoomManager {
                         sub.send_signal(ServerMessage::TracksAvailable {
                             audio: false,
                             video: false,
+                            screen: false,
                         });
                     }
                     return;

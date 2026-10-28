@@ -24,6 +24,8 @@ import {
   Scan,
   ChevronDown,
   ChevronUp,
+  Monitor,
+  Video as VideoIcon,
 } from 'lucide-react';
 import { MIN_ZOOM, NETWORK_BATCH_INTERVALS, AUTOSAVE_OPTIONS } from '../config/constants';
 
@@ -55,6 +57,16 @@ export function TopToolbar({
   // Telemetry Metrics
   metrics = {},
   broadcasterOnline = true,
+  // Presentation & Stream Sharing Modes
+  activeShareMode = 'whiteboard',
+  onSelectShareMode,
+  isScreenSharing = false,
+  currentViewMode = 'whiteboard',
+  onSelectViewMode,
+  isFollowingPresenter = true,
+  onToggleFollowPresenter,
+  hasScreenTrack = false,
+  hasVideoTrack = false,
 }) {
   // Internal state for toggling telemetry visibility with localStorage persistence
   const [internalIsTelemetryVisible, setInternalIsTelemetryVisible] = useState(() => {
@@ -212,13 +224,84 @@ export function TopToolbar({
                   ))}
                 </div>
               </div>
+
+              {onSelectShareMode && (
+                <>
+                  <span className="toolbar-divider" />
+                  <div className="control-group">
+                    <span className="group-label">Broadcast:</span>
+                    <div className="segmented-pill-box mode-switcher">
+                      <button
+                        type="button"
+                        className={`seg-btn-xs ${activeShareMode === 'whiteboard' ? 'active' : ''}`}
+                        onClick={() => onSelectShareMode('whiteboard')}
+                        title="Broadcast Whiteboard Canvas"
+                      >
+                        <PenTool size={11} />
+                        <span>Board</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`seg-btn-xs ${activeShareMode === 'screen' ? 'active' : ''} ${isScreenSharing ? 'live-border' : ''}`}
+                        onClick={() => onSelectShareMode('screen')}
+                        title="Broadcast Screen Share (1080p WebRTC SFU)"
+                      >
+                        <Monitor size={11} className={isScreenSharing ? 'text-blue-400' : ''} />
+                        <span>Screen</span>
+                        {isScreenSharing && <span className="mini-live-dot" />}
+                      </button>
+                      <button
+                        type="button"
+                        className={`seg-btn-xs ${activeShareMode === 'video' ? 'active' : ''}`}
+                        onClick={() => onSelectShareMode('video')}
+                        title="Broadcast Full-Resolution Presenter Video (WebRTC SFU)"
+                      >
+                        <VideoIcon size={11} />
+                        <span>Video</span>
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           ) : (
-            /* Stream: Follow Presenter (Default & Permanent) */
+            /* Stream: Presenter Broadcast Status Display (Viewers have no controls; dictation is by broadcaster only) */
             <div className="center-selectors-cluster">
-              <div className="telemetry-pill-compact" title="Synchronized with presenter zoom, pan, and strokes in real-time">
-                <Eye size={12} className="text-blue-600" />
-                <span className="stream-sync-label">Follow Presenter</span>
+              <div
+                className={`stream-mode-indicator ${
+                  currentViewMode === 'screen'
+                    ? 'mode-screen'
+                    : currentViewMode === 'video'
+                    ? 'mode-video'
+                    : 'mode-whiteboard'
+                }`}
+                title={`Presenter is broadcasting ${
+                  currentViewMode === 'screen'
+                    ? 'Screen Share'
+                    : currentViewMode === 'video'
+                    ? 'High-Resolution Video'
+                    : 'Whiteboard'
+                }`}
+              >
+                {currentViewMode === 'screen' ? (
+                  <>
+                    <Monitor size={12} className="text-blue-400" />
+                    <span>Presenter: <strong>Screen Share</strong></span>
+                    <span className="mini-live-dot" />
+                  </>
+                ) : currentViewMode === 'video' ? (
+                  <>
+                    <VideoIcon size={12} className="text-emerald-400" />
+                    <span>Presenter: <strong>Live Video (HD)</strong></span>
+                    <span className="mini-live-dot" />
+                  </>
+                ) : (
+                  <>
+                    <PenTool size={12} className="text-indigo-400" />
+                    <span>Presenter: <strong>Whiteboard</strong></span>
+                    <span className="mini-live-dot" />
+                  </>
+                )}
               </div>
             </div>
           )}

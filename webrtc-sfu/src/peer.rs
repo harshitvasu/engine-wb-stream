@@ -41,6 +41,7 @@ pub struct PeerSession {
     pub rtc: Rtc,
     pub audio_mid: Option<Mid>,
     pub video_mid: Option<Mid>,
+    pub screen_mid: Option<Mid>,
     pub ws_sender: Option<UnboundedSender<ServerMessage>>,
     pub is_connected: bool,
     pub next_timeout: Instant,
@@ -93,6 +94,7 @@ impl PeerSession {
             rtc,
             audio_mid: None,
             video_mid: None,
+            screen_mid: None,
             ws_sender,
             is_connected: false,
             next_timeout: now,
@@ -100,21 +102,47 @@ impl PeerSession {
     }
 
     /// Process remote SDP offer, generate SDP answer, and register media MIDs
-    pub fn handle_offer(&mut self, sdp: &str) -> Result<String, anyhow::Error> {
+    pub fn handle_offer(
+        &mut self,
+        sdp: &str,
+        tracks: Option<&crate::signaling::TrackMapping>,
+    ) -> Result<String, anyhow::Error> {
         let offer = SdpOffer::from_sdp_string(sdp)?;
         let answer = self.rtc.sdp_api().accept_offer(offer)?;
+
+        if let Some(t) = tracks {
+            if let Some(a_mid) = &t.audio_mid {
+                self.audio_mid = Some(Mid::from(a_mid.as_str()));
+                info!("[Peer {}] Explicitly Mapped Audio MID: {}", self.peer_id, a_mid);
+            }
+            if let Some(v_mid) = &t.video_mid {
+                self.video_mid = Some(Mid::from(v_mid.as_str()));
+                info!("[Peer {}] Explicitly Mapped Camera Video MID: {}", self.peer_id, v_mid);
+            }
+            if let Some(s_mid) = &t.screen_mid {
+                self.screen_mid = Some(Mid::from(s_mid.as_str()));
+                info!("[Peer {}] Explicitly Mapped Screen Video MID: {}", self.peer_id, s_mid);
+            }
+        }
 
         // Map audio and video MIDs from negotiated media lines using rtc.media()
         for m in &answer.media_lines {
             if let Some(media) = self.rtc.media(m.mid()) {
                 match media.kind() {
                     MediaKind::Audio => {
-                        self.audio_mid = Some(m.mid());
-                        info!("[Peer {}] Mapped Audio MID: {}", self.peer_id, m.mid());
+                        if self.audio_mid.is_none() {
+                            self.audio_mid = Some(m.mid());
+                            info!("[Peer {}] Auto-Mapped Audio MID: {}", self.peer_id, m.mid());
+                        }
                     }
                     MediaKind::Video => {
-                        self.video_mid = Some(m.mid());
-                        info!("[Peer {}] Mapped Video MID: {}", self.peer_id, m.mid());
+                        if self.video_mid.is_none() {
+                            self.video_mid = Some(m.mid());
+                            info!("[Peer {}] Auto-Mapped Video MID: {}", self.peer_id, m.mid());
+                        } else if self.screen_mid.is_none() && Some(m.mid()) != self.video_mid {
+                            self.screen_mid = Some(m.mid());
+                            info!("[Peer {}] Auto-Mapped Screen MID: {}", self.peer_id, m.mid());
+                        }
                     }
                 }
             }
@@ -155,12 +183,26 @@ impl PeerSession {
         Ok(())
     }
 
-    /// Request a video keyframe (PLI) from this publisher
-    pub fn request_keyframe(&mut self) {
-        if let Some(video_mid) = self.video_mid {
-            if let Some(rx) = self.rtc.direct_api().stream_rx_by_mid(video_mid, None) {
-                rx.request_keyframe(KeyframeRequestKind::Pli);
-                debug!("[Peer {}] Dispatched PLI keyframe request for MID {}", self.peer_id, video_mid);
+    /// Request a video or screen keyframe (PLI) from this publisher
+    pub fn request_keyframe(&mut self, kind: Option<&str>) {
+        let req_video = kind.is_none() || kind == Some("video") || kind == Some("all");
+        let req_screen = kind.is_none() || kind == Some("screen") || kind == Some("all");
+
+        if req_video {
+            if let Some(video_mid) = self.video_mid {
+                if let Some(rx) = self.rtc.direct_api().stream_rx_by_mid(video_mid, None) {
+                    rx.request_keyframe(KeyframeRequestKind::Pli);
+                    debug!("[Peer {}] Dispatched PLI keyframe request for Video MID {}", self.peer_id, video_mid);
+                }
+            }
+        }
+
+        if req_screen {
+            if let Some(screen_mid) = self.screen_mid {
+                if let Some(rx) = self.rtc.direct_api().stream_rx_by_mid(screen_mid, None) {
+                    rx.request_keyframe(KeyframeRequestKind::Pli);
+                    debug!("[Peer {}] Dispatched PLI keyframe request for Screen MID {}", self.peer_id, screen_mid);
+                }
             }
         }
     }
@@ -254,6 +296,27 @@ mod tests {
         let (offer, _pending) = change.apply().unwrap();
         let answer = rtc.sdp_api().accept_offer(offer).unwrap();
         println!("=== DUAL CANDIDATE ANSWER SDP ===\n{}", answer.to_sdp_string());
+    }
+
+    #[test]
+    fn test_multi_video_sdp_negotiation() {
+        let mut rtc = Rtc::builder().build(Instant::now());
+        let mut client_rtc = Rtc::builder().build(Instant::now());
+        let mut change = client_rtc.sdp_api();
+        change.add_media(MediaKind::Audio, str0m::media::Direction::SendOnly, None, None, None);
+        change.add_media(MediaKind::Video, str0m::media::Direction::SendOnly, None, None, None); // camera
+        change.add_media(MediaKind::Video, str0m::media::Direction::SendOnly, None, None, None); // screen
+        let (offer, _pending) = change.apply().unwrap();
+        assert_eq!(offer.media_lines.len(), 3);
+
+        let answer = rtc.sdp_api().accept_offer(offer).unwrap();
+        assert_eq!(answer.media_lines.len(), 3);
+        let m0 = &answer.media_lines[0];
+        let m1 = &answer.media_lines[1];
+        let m2 = &answer.media_lines[2];
+        assert_eq!(rtc.media(m0.mid()).unwrap().kind(), MediaKind::Audio);
+        assert_eq!(rtc.media(m1.mid()).unwrap().kind(), MediaKind::Video);
+        assert_eq!(rtc.media(m2.mid()).unwrap().kind(), MediaKind::Video);
     }
 
     #[test]

@@ -19,6 +19,7 @@ export class RoomState {
     };
     this.revision = 0;
     this.videoRotation = 0; // Broadcaster video orientation angle in degrees (0, 90, 180, 270)
+    this.activeShare = 'whiteboard'; // Active presentation stream: 'whiteboard' | 'screen' | 'video'
     this.lastAutosave = Date.now();
     this.createdAt = Date.now();
 
@@ -83,6 +84,7 @@ export class RoomState {
       elements: Array.from(this.elementsMap.values()),
       appState: this.appState,
       videoRotation: this.videoRotation,
+      activeShare: this.activeShare || 'whiteboard',
       timestamp: Date.now(),
       stats: {
         viewersCount: this.viewers.size,
@@ -100,6 +102,30 @@ export class RoomState {
       type: 'video_rotation',
       roomId: this.id,
       videoRotation: this.videoRotation,
+      timestamp: Date.now(),
+    };
+    const raw = JSON.stringify(msg);
+    const bytes = Buffer.byteLength(raw, 'utf8');
+
+    for (const viewer of this.viewers.values()) {
+      const ok = viewer.enqueue(msg, raw, DeliveryClass.RELIABLE);
+      if (ok) {
+        this.stats.bytesEgress += bytes;
+      }
+    }
+  }
+
+  /**
+   * Updates active broadcast presentation share mode ('whiteboard' | 'screen' | 'video')
+   * and broadcasts the mode change to all viewers in the room.
+   */
+  setActiveShare(mode) {
+    const validModes = ['whiteboard', 'screen', 'video'];
+    this.activeShare = validModes.includes(mode) ? mode : 'whiteboard';
+    const msg = {
+      type: 'share_mode',
+      roomId: this.id,
+      activeShare: this.activeShare,
       timestamp: Date.now(),
     };
     const raw = JSON.stringify(msg);

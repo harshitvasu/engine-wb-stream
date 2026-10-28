@@ -10,6 +10,17 @@ pub struct CandidatePayload {
     pub sdp_m_line_index: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMapping {
+    #[serde(default)]
+    pub audio_mid: Option<String>,
+    #[serde(default)]
+    pub video_mid: Option<String>,
+    #[serde(default)]
+    pub screen_mid: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -24,6 +35,8 @@ pub enum ClientMessage {
         sdp: String,
         #[serde(rename = "peerId")]
         peer_id: String,
+        #[serde(default)]
+        tracks: Option<TrackMapping>,
     },
     Answer {
         sdp: String,
@@ -38,6 +51,18 @@ pub enum ClientMessage {
     RequestKeyframe {
         #[serde(rename = "peerId")]
         peer_id: String,
+        #[serde(default)]
+        kind: Option<String>, // "video", "screen", "all"
+    },
+    TracksUpdate {
+        #[serde(rename = "peerId")]
+        peer_id: String,
+        #[serde(default)]
+        audio: bool,
+        #[serde(default)]
+        video: bool,
+        #[serde(default)]
+        screen: bool,
     },
     Ping,
     Leave {
@@ -76,6 +101,8 @@ pub enum ServerMessage {
     TracksAvailable {
         audio: bool,
         video: bool,
+        #[serde(default)]
+        screen: bool,
     },
     PeerDisconnected {
         #[serde(rename = "peerId")]

@@ -21,6 +21,7 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
   const [broadcasterOnline, setBroadcasterOnline] = useState(false);
   const [streamError, setStreamError] = useState(null);
   const [videoRotation, setVideoRotation] = useState(0);
+  const [activeShareMode, setActiveShareMode] = useState('whiteboard');
 
   // Stream controls state with persistence
   const [controls, setControlsState] = useState(() => getSavedStreamControls());
@@ -635,8 +636,20 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
           return;
         }
 
-        if ((msg.type === 'init' || msg.type === 'snapshot') && typeof msg.videoRotation === 'number') {
-          setVideoRotation(msg.videoRotation);
+        if (msg.type === 'share_mode') {
+          if (typeof msg.activeShare === 'string') {
+            setActiveShareMode(msg.activeShare);
+          }
+          return;
+        }
+
+        if ((msg.type === 'init' || msg.type === 'snapshot')) {
+          if (typeof msg.videoRotation === 'number') {
+            setVideoRotation(msg.videoRotation);
+          }
+          if (typeof msg.activeShare === 'string') {
+            setActiveShareMode(msg.activeShare);
+          }
         }
 
         // Telemetry counters
@@ -872,6 +885,7 @@ export function useWhiteboardViewer({ roomId = 'default' } = {}) {
     streamError,
     retryConnection,
     videoRotation,
+    activeShareMode,
     // Stream Controls
     controls,
     updateControl,

@@ -12,6 +12,7 @@ import {
   RotateCcw,
   RotateCw,
   User,
+  Monitor,
 } from 'lucide-react';
 
 export function PublisherVideoThumbnail({
@@ -20,6 +21,8 @@ export function PublisherVideoThumbnail({
   isConnected = false,
   isMicMuted = false,
   isVideoDisabled = false,
+  isScreenSharing = false,
+  onToggleScreenShare,
   hasVideoTrack = null,
   hasAudioTrack = null,
   rotation = 0,
@@ -39,9 +42,33 @@ export function PublisherVideoThumbnail({
   const [isAutoplayBlocked, setIsAutoplayBlocked] = useState(false);
   const [internalRotation, setInternalRotation] = useState(0);
   const [, setTrackState] = useState(0);
+  const [thumbnailResText, setThumbnailResText] = useState('360p');
 
   const currentRotation = rotation !== undefined ? rotation : internalRotation;
   const handleRotate = onRotate || (() => setInternalRotation((prev) => prev + 90));
+
+  // Dynamically detect thumbnail video resolution from stream
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const updateRes = () => {
+      if (video.videoWidth && video.videoHeight) {
+        const h = Math.min(video.videoWidth, video.videoHeight);
+        if (h <= 240) setThumbnailResText('240p');
+        else if (h <= 360) setThumbnailResText('360p');
+        else if (h <= 480) setThumbnailResText('480p');
+        else setThumbnailResText('360p');
+      }
+    };
+
+    video.addEventListener('loadedmetadata', updateRes);
+    video.addEventListener('resize', updateRes);
+    return () => {
+      video.removeEventListener('loadedmetadata', updateRes);
+      video.removeEventListener('resize', updateRes);
+    };
+  }, [stream]);
 
   // Re-render when tracks are added or removed on the stream
   useEffect(() => {
@@ -158,6 +185,9 @@ export function PublisherVideoThumbnail({
           ) : (
             <span className="media-tag connecting">CONNECTING</span>
           )}
+          <span className="media-tag res-tag" title="Thumbnail Resolution (Optimized Bandwidth)">
+            {thumbnailResText}
+          </span>
         </div>
 
         <div className="media-card-actions">
@@ -280,6 +310,18 @@ export function PublisherVideoThumbnail({
                   {isVideoDisabled ? <VideoOff size={13} /> : <VideoIcon size={13} />}
                   <span>{isVideoDisabled ? 'Cam Off' : 'Cam On'}</span>
                 </button>
+
+                {onToggleScreenShare && (
+                  <button
+                    type="button"
+                    onClick={onToggleScreenShare}
+                    className={`ctrl-btn ${isScreenSharing ? 'active-share' : ''}`}
+                    title={isScreenSharing ? 'Stop Screen Sharing' : 'Share Screen (WebRTC SFU)'}
+                  >
+                    <Monitor size={13} className={isScreenSharing ? 'text-blue-400' : ''} />
+                    <span>{isScreenSharing ? 'Stop Screen' : 'Share Screen'}</span>
+                  </button>
+                )}
 
                 <button
                   type="button"
