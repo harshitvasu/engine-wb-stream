@@ -10,7 +10,7 @@ import { logToServer } from '../utils/remoteLogger';
 function prioritizeH264(transceiver) {
   if (!transceiver || typeof transceiver.setCodecPreferences !== 'function') return;
   try {
-    const kind = transceiver.receiver?.track?.kind || 'video';
+    const kind = transceiver.receiver?.track?.kind || transceiver.sender?.track?.kind || 'video';
     const capabilities =
       (typeof RTCRtpReceiver.getCapabilities === 'function' && RTCRtpReceiver.getCapabilities(kind)) ||
       (typeof RTCRtpSender.getCapabilities === 'function' && RTCRtpSender.getCapabilities(kind));
@@ -18,9 +18,12 @@ function prioritizeH264(transceiver) {
 
     const codecs = capabilities.codecs;
     const h264Codecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/h264');
-    const otherCodecs = codecs.filter((c) => !c.mimeType || c.mimeType.toLowerCase() !== 'video/h264');
+    const rtxCodecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/rtx');
+    const otherCodecs = codecs.filter(
+      (c) => c.mimeType && c.mimeType.toLowerCase() !== 'video/h264' && c.mimeType.toLowerCase() !== 'video/rtx'
+    );
     if (h264Codecs.length > 0) {
-      transceiver.setCodecPreferences([...h264Codecs, ...otherCodecs]);
+      transceiver.setCodecPreferences([...h264Codecs, ...rtxCodecs, ...otherCodecs]);
     }
   } catch (err) {
     console.warn('[WebRTC Subscriber] prioritizeH264 error:', err);
@@ -290,10 +293,12 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
       // 2. Camera Video Transceiver (recvonly) - Full Resolution Camera
       const cameraTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
       cameraTransceiverRef.current = cameraTransceiver;
+      prioritizeH264(cameraTransceiver);
 
       // 3. Screen Video Transceiver (recvonly) - Full Resolution Screen Sharing
       const screenTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
       screenTransceiverRef.current = screenTransceiver;
+      prioritizeH264(screenTransceiver);
 
       pc.ontrack = (e) => {
         const kind = e.track.kind;

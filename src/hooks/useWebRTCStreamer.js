@@ -10,17 +10,20 @@ import { logToServer } from '../utils/remoteLogger';
 function prioritizeH264(transceiver) {
   if (!transceiver || typeof transceiver.setCodecPreferences !== 'function') return;
   try {
-    const kind = transceiver.receiver?.track?.kind || 'video';
+    const kind = transceiver.receiver?.track?.kind || transceiver.sender?.track?.kind || 'video';
     const capabilities =
-      (typeof RTCRtpReceiver.getCapabilities === 'function' && RTCRtpReceiver.getCapabilities(kind)) ||
-      (typeof RTCRtpSender.getCapabilities === 'function' && RTCRtpSender.getCapabilities(kind));
+      (typeof RTCRtpSender.getCapabilities === 'function' && RTCRtpSender.getCapabilities(kind)) ||
+      (typeof RTCRtpReceiver.getCapabilities === 'function' && RTCRtpReceiver.getCapabilities(kind));
     if (!capabilities || !capabilities.codecs) return;
 
     const codecs = capabilities.codecs;
     const h264Codecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/h264');
-    const otherCodecs = codecs.filter((c) => !c.mimeType || c.mimeType.toLowerCase() !== 'video/h264');
+    const rtxCodecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/rtx');
+    const otherCodecs = codecs.filter(
+      (c) => c.mimeType && c.mimeType.toLowerCase() !== 'video/h264' && c.mimeType.toLowerCase() !== 'video/rtx'
+    );
     if (h264Codecs.length > 0) {
-      transceiver.setCodecPreferences([...h264Codecs, ...otherCodecs]);
+      transceiver.setCodecPreferences([...h264Codecs, ...rtxCodecs, ...otherCodecs]);
     }
   } catch (err) {
     console.warn('[WebRTC Publisher] prioritizeH264 error:', err);
@@ -546,6 +549,7 @@ export function useWebRTCStreamer({
         streams: [stream],
       });
       videoSenderRef.current = cameraTransceiver.sender;
+      prioritizeH264(cameraTransceiver);
 
       // 3. Screen Video Transceiver (Full Resolution)
       const currentScreenTrack = screenStreamRef.current?.getVideoTracks()?.[0] || null;
@@ -554,6 +558,7 @@ export function useWebRTCStreamer({
       });
       screenTransceiverRef.current = screenTransceiver;
       screenSenderRef.current = screenTransceiver.sender;
+      prioritizeH264(screenTransceiver);
       if (currentScreenTrack) {
         try {
           await screenTransceiver.sender.replaceTrack(currentScreenTrack);
