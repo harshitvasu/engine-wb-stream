@@ -18,10 +18,6 @@ function prioritizeH264(transceiver) {
 
     const codecs = capabilities.codecs;
     const h264Codecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/h264');
-    const rtxCodecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/rtx');
-    const otherCodecs = codecs.filter(
-      (c) => c.mimeType && c.mimeType.toLowerCase() !== 'video/h264' && c.mimeType.toLowerCase() !== 'video/rtx'
-    );
 
     // Prioritize Constrained Baseline (42e01f and 42001f with packetization-mode=1)
     // for seamless Apple VideoToolbox (Safari/iOS) and Chrome interoperability
@@ -35,9 +31,16 @@ function prioritizeH264(transceiver) {
     const orderedH264 = [...baselineH264, ...cbH264, ...otherH264];
 
     if (orderedH264.length > 0) {
-      transceiver.setCodecPreferences([...orderedH264, ...rtxCodecs, ...otherCodecs]);
+      // In W3C WebRTC 1.0, passing only primary media codecs is valid and cleanly omits RTX.
+      // Passing separate RTX codecs without their accompanying primary codecs causes InvalidModificationError in Chrome.
+      transceiver.setCodecPreferences(orderedH264);
+      logToServer('WebRTC-Codec', 'Prioritized H.264 codecs successfully', {
+        preferredProfile: orderedH264[0]?.sdpFmtpLine || orderedH264[0]?.mimeType,
+        totalH264Profiles: orderedH264.length,
+      });
     }
   } catch (err) {
+    logToServer('WebRTC-Codec', 'Failed to setCodecPreferences', { error: err?.message || String(err) });
     console.warn('[WebRTC Publisher] prioritizeH264 error:', err);
   }
 }
@@ -304,12 +307,6 @@ export function useWebRTCStreamer({
     setScreenStream(null);
     setIsScreenSharing(false);
 
-    if (screenTransceiverRef.current) {
-      try {
-        screenTransceiverRef.current.direction = 'inactive';
-      } catch {}
-    }
-
     if (screenSenderRef.current) {
       try {
         screenSenderRef.current.replaceTrack(null);
@@ -563,10 +560,10 @@ export function useWebRTCStreamer({
       videoSenderRef.current = cameraTransceiver.sender;
       prioritizeH264(cameraTransceiver);
 
-      // 3. Screen Video Transceiver (Full Resolution)
+      // 3. Screen Video Transceiver (Full Resolution - Negotiated sendonly so media flows immediately on replaceTrack)
       const currentScreenTrack = screenStreamRef.current?.getVideoTracks()?.[0] || null;
       const screenTransceiver = pc.addTransceiver(currentScreenTrack || 'video', {
-        direction: currentScreenTrack ? 'sendonly' : 'inactive',
+        direction: 'sendonly',
       });
       screenTransceiverRef.current = screenTransceiver;
       screenSenderRef.current = screenTransceiver.sender;
@@ -656,6 +653,19 @@ export function useWebRTCStreamer({
             },
           })
         );
+
+        // If screen sharing was active, notify SFU immediately
+        if (screenStreamRef.current?.getVideoTracks()?.some((t) => t.readyState === 'live')) {
+          ws.send(
+            JSON.stringify({
+              type: 'tracks_update',
+              peerId: peerIdRef.current,
+              audio: true,
+              video: !isVideoDisabled,
+              screen: true,
+            })
+          );
+        }
       }
     }
   }, [roomId]);

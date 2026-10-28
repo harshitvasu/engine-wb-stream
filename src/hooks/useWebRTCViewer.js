@@ -18,10 +18,6 @@ function prioritizeH264(transceiver) {
 
     const codecs = capabilities.codecs;
     const h264Codecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/h264');
-    const rtxCodecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/rtx');
-    const otherCodecs = codecs.filter(
-      (c) => c.mimeType && c.mimeType.toLowerCase() !== 'video/h264' && c.mimeType.toLowerCase() !== 'video/rtx'
-    );
 
     // Prioritize Constrained Baseline (42e01f and 42001f with packetization-mode=1)
     // for seamless Apple VideoToolbox (Safari/iOS) and Chrome interoperability
@@ -35,9 +31,16 @@ function prioritizeH264(transceiver) {
     const orderedH264 = [...baselineH264, ...cbH264, ...otherH264];
 
     if (orderedH264.length > 0) {
-      transceiver.setCodecPreferences([...orderedH264, ...rtxCodecs, ...otherCodecs]);
+      // In W3C WebRTC 1.0, passing only primary media codecs is valid and cleanly omits RTX.
+      // Passing separate RTX codecs without their accompanying primary codecs causes InvalidModificationError in Chrome.
+      transceiver.setCodecPreferences(orderedH264);
+      logToServer('WebRTC-Codec', 'Subscriber prioritized H.264 codecs successfully', {
+        preferredProfile: orderedH264[0]?.sdpFmtpLine || orderedH264[0]?.mimeType,
+        totalH264Profiles: orderedH264.length,
+      });
     }
   } catch (err) {
+    logToServer('WebRTC-Codec', 'Subscriber failed to setCodecPreferences', { error: err?.message || String(err) });
     console.warn('[WebRTC Subscriber] prioritizeH264 error:', err);
   }
 }
@@ -385,8 +388,18 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
             setTimeout(() => requestKeyframe('screen'), 800);
           }
 
+          e.track.onunmute = () => {
+            logToServer('Subscriber-RTC', `Inbound track unmuted (media packets arriving): kind=${kind}, mid=${mid}`);
+            if (isCamera) setHasVideoTrack(true);
+            else setHasScreenTrack(true);
+          };
+
+          e.track.onmute = () => {
+            logToServer('Subscriber-RTC', `Inbound track muted (waiting for media packets): kind=${kind}, mid=${mid}`);
+          };
+
           e.track.onended = () => {
-            logToServer('Subscriber-RTC', `Inbound track ended: kind=${kind}`);
+            logToServer('Subscriber-RTC', `Inbound track ended: kind=${kind}, mid=${mid}`);
             if (isCamera) setHasVideoTrack(false);
             else setHasScreenTrack(false);
           };

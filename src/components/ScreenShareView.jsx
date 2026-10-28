@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
+import { logToServer } from '../utils/remoteLogger';
 import {
   Monitor,
   Maximize2,
@@ -37,11 +38,21 @@ export function ScreenShareView({
     if (stream) {
       if (video.srcObject !== stream) {
         video.srcObject = stream;
+        logToServer('ScreenShare-Video', 'Attached stream to video.srcObject', {
+          isPublisher,
+          streamId: stream.id,
+          videoTracks: stream.getVideoTracks().map((t) => ({ id: t.id, readyState: t.readyState, muted: t.muted })),
+        });
       }
 
       const updateResolution = () => {
         if (video.videoWidth && video.videoHeight) {
           setResolutionText(`${video.videoWidth}×${video.videoHeight}`);
+          logToServer('ScreenShare-Video', 'video metadata loaded', {
+            isPublisher,
+            width: video.videoWidth,
+            height: video.videoHeight,
+          });
         }
       };
 
@@ -54,8 +65,14 @@ export function ScreenShareView({
           if (!isPublisher) {
             setIsAutoplayBlocked(false);
           }
+          logToServer('ScreenShare-Video', 'video.play() SUCCESS', { isPublisher });
         })
         .catch((err) => {
+          logToServer('ScreenShare-Video', 'video.play() CAUGHT ERROR', {
+            isPublisher,
+            name: err.name,
+            message: err.message,
+          });
           if (!isPublisher && (err.name === 'NotAllowedError' || err.name === 'AbortError')) {
             setIsAutoplayBlocked(true);
             video.muted = true;

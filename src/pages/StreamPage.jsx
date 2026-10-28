@@ -213,7 +213,7 @@ export function StreamPage() {
       {currentViewMode === 'screen' ? (
         <ScreenShareView
           stream={screenStream}
-          isLive={hasScreenTrack}
+          isLive={hasScreenTrack || !!(screenStream && screenStream.getVideoTracks().some((t) => t.readyState === 'live'))}
           isFullscreen={isFullscreen}
           onToggleFullscreen={toggleFullscreen}
           onRequestKeyframe={() => requestKeyframe('screen')}
