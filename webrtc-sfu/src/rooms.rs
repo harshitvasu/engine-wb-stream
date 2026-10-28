@@ -8,6 +8,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
 
 use crate::config::Config;
+use crate::dashboard::{
+    PeerSnapshot, RoomSnapshot, SfuConfigSnapshot, SfuMetricsSnapshot, SfuStatusResponse,
+};
 use crate::media::MediaRouter;
 use crate::metrics::Metrics;
 use crate::peer::{PeerSession, Role};
@@ -18,6 +21,7 @@ pub struct Room {
     pub id: String,
     pub publisher: Option<PeerSession>,
     pub subscribers: HashMap<String, PeerSession>,
+    pub screen_sharing_active: bool,
 }
 
 impl Room {
@@ -26,6 +30,7 @@ impl Room {
             id,
             publisher: None,
             subscribers: HashMap::new(),
+            screen_sharing_active: false,
         }
     }
 
@@ -81,7 +86,7 @@ impl RoomManager {
                 if let Some(existing) = &mut room.publisher {
                     let is_same_peer = existing.peer_id == peer_id;
                     let is_ws_dead = existing.ws_sender.is_none();
-                    if is_same_peer || is_ws_dead || !existing.is_connected {
+                    if is_same_peer || is_ws_dead {
                         info!(
                             "[Room {}] Replacing previous Publisher ({}) with fresh session ({})",
                             room_id, existing.peer_id, peer_id
@@ -116,7 +121,7 @@ impl RoomManager {
                         existing.send_signal(ServerMessage::TracksAvailable {
                             audio: pub_session.audio_mid.is_some(),
                             video: pub_session.video_mid.is_some(),
-                            screen: pub_session.screen_mid.is_some(),
+                            screen: room.screen_sharing_active,
                         });
                     }
                     return Ok(role);
@@ -136,11 +141,12 @@ impl RoomManager {
                 if let Some(pub_session) = &mut room.publisher {
                     pub_session.request_keyframe(None);
                     self.metrics.inc_keyframe_requests();
+                    let scr_active = room.screen_sharing_active;
                     if let Some(sub) = room.subscribers.get(&peer_id) {
                         sub.send_signal(ServerMessage::TracksAvailable {
                             audio: pub_session.audio_mid.is_some(),
                             video: pub_session.video_mid.is_some(),
-                            screen: pub_session.screen_mid.is_some(),
+                            screen: scr_active,
                         });
                     }
                 }
@@ -172,7 +178,7 @@ impl RoomManager {
                 pub_session.drain_outputs(&mut transmits, &mut frames, &mut keyframe_requested);
                 let has_audio = pub_session.audio_mid.is_some();
                 let has_video = pub_session.video_mid.is_some();
-                let has_screen = pub_session.screen_mid.is_some();
+                let has_screen = room.screen_sharing_active;
                 for sub in room.subscribers.values() {
                     sub.send_signal(ServerMessage::TracksAvailable {
                         audio: has_audio,
@@ -261,6 +267,7 @@ impl RoomManager {
         screen: bool,
     ) {
         if let Some(room) = self.rooms.get_mut(room_id) {
+            room.screen_sharing_active = screen;
             if let Some(pub_session) = &room.publisher {
                 if pub_session.peer_id == peer_id {
                     for sub in room.subscribers.values() {
@@ -283,7 +290,7 @@ impl RoomManager {
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
             self.config.udp_port,
         );
-        let lan_dest = self.config.lan_ip.map(|ip| SocketAddr::new(ip, self.config.udp_port));
+        let lan_dest = self.config.lan_media_addr();
         let public_dest = if !self.config.public_ip.is_loopback() {
             Some(self.config.public_media_addr())
         } else {
@@ -332,6 +339,11 @@ impl RoomManager {
                     );
 
                     if pub_session.rtc.accepts(&input) {
+                        pub_session.remote_addr = Some(source);
+                        pub_session.stats.packets_in += 1;
+                        pub_session.stats.bytes_in += contents.len() as u64;
+                        pub_session.stats.last_packet_time = Some(now);
+
                         if let Err(e) = pub_session.rtc.handle_input(input) {
                             debug!("[Pub {}] Error handling input: {:?}", pub_session.peer_id, e);
                         }
@@ -343,8 +355,17 @@ impl RoomManager {
                         let pub_video = pub_session.video_mid;
                         let pub_screen = pub_session.screen_mid;
 
-                        // Forward media frames to subscribers
+                        // Track publisher ingress frames
                         for frame in &frames {
+                            if Some(frame.mid) == pub_audio {
+                                pub_session.stats.audio_frames_in += 1;
+                            } else if Some(frame.mid) == pub_video {
+                                pub_session.stats.video_frames_in += 1;
+                            } else if Some(frame.mid) == pub_screen {
+                                pub_session.stats.screen_frames_in += 1;
+                            }
+                            pub_session.stats.last_frame_time = Some(now);
+
                             MediaRouter::forward_frame(
                                 frame,
                                 pub_audio,
@@ -377,6 +398,11 @@ impl RoomManager {
                     );
 
                     if sub_session.rtc.accepts(&input) {
+                        sub_session.remote_addr = Some(source);
+                        sub_session.stats.packets_in += 1;
+                        sub_session.stats.bytes_in += contents.len() as u64;
+                        sub_session.stats.last_packet_time = Some(now);
+
                         if let Err(e) = sub_session.rtc.handle_input(input) {
                             debug!("[Sub {}] Error handling input: {:?}", sub_session.peer_id, e);
                         }
@@ -456,13 +482,19 @@ impl RoomManager {
         if let Some(room) = self.rooms.get_mut(room_id) {
             if let Some(pub_session) = &mut room.publisher {
                 if pub_session.peer_id == peer_id {
-                    pub_session.ws_sender = None;
-                    if !pub_session.is_connected {
-                        info!("[Room {}] Removed inactive Publisher ({}) on WS close", room_id, peer_id);
-                        room.publisher = None;
-                        self.metrics.dec_publishers();
-                    } else {
-                        info!("[Room {}] Publisher ({}) WS dropped; WebRTC UDP media remains active", room_id, peer_id);
+                    info!("[Room {}] Publisher ({}) WS closed; removing publisher from room", room_id, peer_id);
+                    room.publisher = None;
+                    room.screen_sharing_active = false;
+                    self.metrics.dec_publishers();
+                    for sub in room.subscribers.values() {
+                        sub.send_signal(ServerMessage::PeerDisconnected {
+                            peer_id: peer_id.to_string(),
+                        });
+                        sub.send_signal(ServerMessage::TracksAvailable {
+                            audio: false,
+                            video: false,
+                            screen: false,
+                        });
                     }
                     return;
                 }
@@ -487,6 +519,7 @@ impl RoomManager {
                 if pub_session.peer_id == peer_id {
                     info!("[Room {}] Publisher ({}) disconnected", room_id, peer_id);
                     room.publisher = None;
+                    room.screen_sharing_active = false;
                     self.metrics.dec_publishers();
                     // Notify subscribers
                     for sub in room.subscribers.values() {
@@ -509,4 +542,165 @@ impl RoomManager {
             }
         }
     }
+
+    /// Produce a complete diagnostic status snapshot of all active rooms, publishers, subscribers and SFU metrics
+    pub fn get_status_snapshot(&self, start_time: Instant) -> SfuStatusResponse {
+        let now = Instant::now();
+        let uptime_seconds = now.duration_since(start_time).as_secs();
+
+        let mut active_publishers = 0;
+        let mut active_subscribers = 0;
+        let mut room_snapshots = Vec::new();
+
+        for (room_id, room) in &self.rooms {
+            let pub_snapshot = room.publisher.as_ref().map(|p| {
+                if p.is_connected {
+                    active_publishers += 1;
+                }
+                p.to_snapshot(now)
+            });
+
+            let sub_snapshots: Vec<PeerSnapshot> = room
+                .subscribers
+                .values()
+                .map(|s| {
+                    if s.is_connected {
+                        active_subscribers += 1;
+                    }
+                    s.to_snapshot(now)
+                })
+                .collect();
+
+            let sub_count = sub_snapshots.len();
+
+            room_snapshots.push(RoomSnapshot {
+                room_id: room_id.clone(),
+                publisher: pub_snapshot,
+                subscribers: sub_snapshots,
+                subscribers_count: sub_count,
+            });
+        }
+
+        room_snapshots.sort_by(|a, b| a.room_id.cmp(&b.room_id));
+
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        SfuStatusResponse {
+            server_time: format!("{}", epoch),
+            uptime_seconds,
+            active_rooms: self.rooms.len(),
+            active_publishers,
+            active_subscribers,
+            metrics: SfuMetricsSnapshot {
+                audio_frames_forwarded: self.metrics.audio_frames_forwarded.load(std::sync::atomic::Ordering::Relaxed),
+                video_frames_forwarded: self.metrics.video_frames_forwarded.load(std::sync::atomic::Ordering::Relaxed),
+                keyframe_requests: self.metrics.keyframe_requests.load(std::sync::atomic::Ordering::Relaxed),
+                udp_packets_received: self.metrics.udp_packets_received.load(std::sync::atomic::Ordering::Relaxed),
+                errors: self.metrics.errors.load(std::sync::atomic::Ordering::Relaxed),
+            },
+            config: SfuConfigSnapshot {
+                signaling_port: self.config.signaling_port,
+                udp_port: self.config.udp_port,
+                public_ip: self.config.public_ip.to_string(),
+                lan_ip: self.config.lan_ip.map(|i| i.to_string()),
+            },
+            rooms: room_snapshots,
+        }
+    }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    #[test]
+    fn test_multi_room_publishers_and_disconnect() {
+        let config = Config::from_env();
+        let metrics = Arc::new(Metrics::new());
+        let mut mgr = RoomManager::new(config, metrics.clone());
+
+        let (tx1, _rx1) = unbounded_channel();
+        let (tx2, _rx2) = unbounded_channel();
+
+        // 1. Publisher joins room-alpha
+        let res1 = mgr.join("room-alpha".to_string(), "publisher", "pub-1".to_string(), Some(tx1));
+        assert!(res1.is_ok());
+        assert_eq!(metrics.active_publishers.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // 2. Publisher joins room-beta simultaneously
+        let res2 = mgr.join("room-beta".to_string(), "publisher", "pub-2".to_string(), Some(tx2.clone()));
+        assert!(res2.is_ok());
+        assert_eq!(metrics.active_publishers.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+        // 3. Second publisher joins room-alpha while pub-1 is active -> fails
+        let res3 = mgr.join("room-alpha".to_string(), "publisher", "pub-3".to_string(), Some(tx2.clone()));
+        assert!(res3.is_err());
+
+        // 4. Publisher 1 leaves room-alpha
+        mgr.leave("room-alpha", "pub-1");
+        assert_eq!(metrics.active_publishers.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let room_alpha = mgr.rooms.get("room-alpha").unwrap();
+        assert!(room_alpha.publisher.is_none());
+
+        // 5. Publisher 3 can now join room-alpha
+        let (tx3, _rx3) = unbounded_channel();
+        let res4 = mgr.join("room-alpha".to_string(), "publisher", "pub-3".to_string(), Some(tx3));
+        assert!(res4.is_ok());
+        assert_eq!(metrics.active_publishers.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+        // 6. Publisher 3 drops WS connection
+        mgr.handle_ws_disconnect("room-alpha", "pub-3");
+        assert_eq!(metrics.active_publishers.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let room_alpha_after_ws = mgr.rooms.get("room-alpha").unwrap();
+        assert!(room_alpha_after_ws.publisher.is_none());
+    }
+
+    #[test]
+    fn test_sfu_status_snapshot_and_rooms_structure() {
+        let config = Config::from_env();
+        let metrics = Arc::new(Metrics::new());
+        let mut mgr = RoomManager::new(config, metrics.clone());
+
+        let start = Instant::now();
+
+        // Check empty snapshot
+        let snap1 = mgr.get_status_snapshot(start);
+        assert_eq!(snap1.active_rooms, 0);
+        assert_eq!(snap1.rooms.len(), 0);
+
+        // Add publisher to room-101
+        let (tx_pub, _rx_pub) = unbounded_channel();
+        let res_pub = mgr.join("room-101".to_string(), "publisher", "pub-101".to_string(), Some(tx_pub));
+        assert!(res_pub.is_ok());
+
+        // Add 2 subscribers to room-101
+        let (tx_sub1, _rx_sub1) = unbounded_channel();
+        let (tx_sub2, _rx_sub2) = unbounded_channel();
+        assert!(mgr.join("room-101".to_string(), "subscriber", "sub-1".to_string(), Some(tx_sub1)).is_ok());
+        assert!(mgr.join("room-101".to_string(), "subscriber", "sub-2".to_string(), Some(tx_sub2)).is_ok());
+
+        // Snapshot with room-101
+        let snap2 = mgr.get_status_snapshot(start);
+        assert_eq!(snap2.active_rooms, 1);
+        assert_eq!(snap2.rooms.len(), 1);
+
+        let room_snap = &snap2.rooms[0];
+        assert_eq!(room_snap.room_id, "room-101");
+        assert!(room_snap.publisher.is_some());
+        assert_eq!(room_snap.publisher.as_ref().unwrap().peer_id, "pub-101");
+        assert_eq!(room_snap.subscribers_count, 2);
+        assert_eq!(room_snap.subscribers.len(), 2);
+
+        // JSON serialization verification
+        let json_str = serde_json::to_string(&snap2).expect("Snapshot must serialize to JSON");
+        assert!(json_str.contains("pub-101"));
+        assert!(json_str.contains("sub-1"));
+        assert!(json_str.contains("sub-2"));
+        assert!(json_str.contains("room-101"));
+    }
+}
+

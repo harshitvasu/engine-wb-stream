@@ -1,6 +1,51 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import basicSsl from '@vitejs/plugin-basic-ssl';
+import fs from 'fs';
+import path from 'path';
+
+/**
+ * Custom Vite Plugin: Intercepts client logs from iPad/browsers via /__client_log
+ * and prints them formatted directly in the shell terminal running `npm run client`.
+ */
+function clientLoggerPlugin() {
+  return {
+    name: 'client-logger',
+    configureServer(server) {
+      server.middlewares.use('/__client_log', (req, res) => {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk;
+        });
+        req.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            const tag = data.tag || 'CLIENT';
+            const ua = data.ua || 'Browser';
+            const time = data.time || '';
+            const msg = data.msg || '';
+            const details =
+              data.details && Object.keys(data.details).length > 0
+                ? JSON.stringify(data.details)
+                : '';
+
+            const logLine = `[${time}] [${ua}] [${tag}] ${msg} ${details}`;
+            const colorUa = ua.includes('iPad') ? '\x1b[35m' : '\x1b[36m';
+            console.log(
+              `\x1b[90m[${time}]\x1b[0m ${colorUa}[${ua}]\x1b[0m \x1b[33m[${tag}]\x1b[0m \x1b[1m${msg}\x1b[0m \x1b[32m${details}\x1b[0m`
+            );
+            fs.appendFileSync(path.resolve(process.cwd(), 'client_debug.log'), logLine + '\n');
+          } catch {
+            console.log(`\x1b[33m[CLIENT LOG]\x1b[0m ${body}`);
+          }
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'text/plain');
+          res.end('ok');
+        });
+      });
+    },
+  };
+}
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -18,6 +63,7 @@ export default defineConfig(({ mode }) => {
     plugins: [
       react(),
       basicSsl(),
+      clientLoggerPlugin(),
     ],
 
     define: {
@@ -42,6 +88,19 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           rewrite: (path) =>
             path.replace(/^\/rtc-ws/, '') || '/',
+        },
+
+        '/sfu-dashboard': {
+          target: sfuWsTarget.replace(/^ws/, 'http'),
+          changeOrigin: true,
+          rewrite: () => '/dashboard',
+        },
+
+        '/sfu': {
+          target: sfuWsTarget.replace(/^ws/, 'http'),
+          changeOrigin: true,
+          rewrite: (path) =>
+            path.replace(/^\/sfu/, '') || '/',
         },
 
         '/api': {

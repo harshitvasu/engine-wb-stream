@@ -1,45 +1,37 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getSfuWebSocketUrl } from '../config/constants';
+import { logToServer } from '../utils/remoteLogger';
 
 /**
- * Draws the camera feed into a canvas sized to (cw x ch) rotated by `rotationDeg`.
- * Supports full resolution (1080p / 720p) with clean slate letterboxing for portrait rotations.
+ * Prioritizes H.264 video codec on an RTCRtpTransceiver.
+ * iPad and Safari strictly require H.264 for hardware-accelerated video encoding and decoding.
+ * Aligning codecs across broadcaster and subscribers prevents codec mismatch in the SFU router.
  */
-function drawRotatedVideoFrame(ctx, video, cw, ch, rotationDeg) {
-  ctx.fillStyle = '#090d16';
-  ctx.fillRect(0, 0, cw, ch);
+function prioritizeH264(transceiver) {
+  if (!transceiver || typeof transceiver.setCodecPreferences !== 'function') return;
+  try {
+    const kind = transceiver.receiver?.track?.kind || 'video';
+    const capabilities =
+      (typeof RTCRtpReceiver.getCapabilities === 'function' && RTCRtpReceiver.getCapabilities(kind)) ||
+      (typeof RTCRtpSender.getCapabilities === 'function' && RTCRtpSender.getCapabilities(kind));
+    if (!capabilities || !capabilities.codecs) return;
 
-  const vw = video.videoWidth || cw;
-  const vh = video.videoHeight || ch;
-  if (!vw || !vh || video.readyState < 2) return;
-
-  const rot = ((rotationDeg % 360) + 360) % 360;
-
-  ctx.save();
-  ctx.translate(cw / 2, ch / 2);
-  ctx.rotate((rot * Math.PI) / 180);
-
-  let destW, destH;
-  if (rot === 90 || rot === 270) {
-    // When rotated 90 or 270, source width aligns with canvas height, and source height with canvas width
-    const scale = Math.min(cw / vh, ch / vw);
-    destW = vw * scale;
-    destH = vh * scale;
-  } else {
-    const scale = Math.min(cw / vw, ch / vh);
-    destW = vw * scale;
-    destH = vh * scale;
+    const codecs = capabilities.codecs;
+    const h264Codecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/h264');
+    const otherCodecs = codecs.filter((c) => !c.mimeType || c.mimeType.toLowerCase() !== 'video/h264');
+    if (h264Codecs.length > 0) {
+      transceiver.setCodecPreferences([...h264Codecs, ...otherCodecs]);
+    }
+  } catch (err) {
+    console.warn('[WebRTC Publisher] prioritizeH264 error:', err);
   }
-
-  ctx.drawImage(video, -destW / 2, -destH / 2, destW, destH);
-  ctx.restore();
 }
 
 /**
  * Custom hook for the Broadcaster / Publisher to:
- * - Capture local microphone audio (Opus) and camera at Full Resolution (1080p / 720p HD)
+ * - Capture local microphone audio (Opus) and camera at Full Resolution (720p HD)
+ * - Directly forward native hardware-backed MediaStreamTrack to WebRTC (essential for iPad / iOS WebKit hardware encoding)
  * - Capture screen sharing via getDisplayMedia at Full Resolution (1080p / 4k @ 30-60fps) with optional screen audio
- * - Real-time pixel-level video rotation pipeline (90, 180, 270, 360 deg) at native video resolution
  * - Establish an encrypted WebRTC PeerConnection with the custom Rust SFU broadcasting Audio, Video, and Screen tracks
  * - Web Audio mixer combining microphone speech and screen audio
  * - Toggle microphone muting, camera enable/disable, and screen sharing
@@ -73,15 +65,13 @@ export function useWebRTCStreamer({
   const rawStreamRef = useRef(null);
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
-  const rawVideoRef = useRef(null);
-  const canvasRef = useRef(null);
   const rotationRef = useRef(0);
-  const renderLoopActiveRef = useRef(false);
 
   // Transceiver Send Senders
   const audioSenderRef = useRef(null);
   const videoSenderRef = useRef(null);
   const screenSenderRef = useRef(null);
+  const screenTransceiverRef = useRef(null);
 
   // Web Audio Mixer for Mic + Screen Audio
   const audioCtxRef = useRef(null);
@@ -204,6 +194,7 @@ export function useWebRTCStreamer({
       isAcquiringMediaRef.current = true;
       setPermissionError(null);
       setRtcError(null);
+      logToServer('Publisher-Media', 'Calling navigator.mediaDevices.getUserMedia...');
 
       let stream = null;
 
@@ -222,7 +213,7 @@ export function useWebRTCStreamer({
           },
         });
       } catch (err1) {
-        console.warn('[WebRTC Publisher] 720p media failed, trying basic 720p/360p fallback:', err1);
+        logToServer('Publisher-Media', 'Strategy 1 (720p HD) failed', { error: err1.name, msg: err1.message });
         try {
           // Strategy 2: 720p / 360p fallback
           stream = await navigator.mediaDevices.getUserMedia({
@@ -234,18 +225,18 @@ export function useWebRTCStreamer({
             },
           });
         } catch (err2) {
-          console.warn('[WebRTC Publisher] 720p fallback failed, trying basic unconstrained {audio: true, video: true}:', err2);
+          logToServer('Publisher-Media', 'Strategy 2 (fallback) failed', { error: err2.name, msg: err2.message });
           try {
             // Strategy 3: Basic unconstrained audio and video
             stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
           } catch (err3) {
-            console.warn('[WebRTC Publisher] Combined media failed, trying audio-only fallback:', err3);
+            logToServer('Publisher-Media', 'Strategy 3 (basic) failed', { error: err3.name, msg: err3.message });
             try {
               // Strategy 4: Audio only
               stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
               setIsVideoDisabled(true);
             } catch (err4) {
-              console.warn('[WebRTC Publisher] Audio fallback failed, trying video-only fallback:', err4);
+              logToServer('Publisher-Media', 'Strategy 4 (audio only) failed', { error: err4.name, msg: err4.message });
               // Strategy 5: Video only
               stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
               setIsMicMuted(true);
@@ -258,86 +249,27 @@ export function useWebRTCStreamer({
         throw new Error('No camera or microphone device available.');
       }
 
+      const vTrack = stream.getVideoTracks()[0];
+      const aTrack = stream.getAudioTracks()[0];
+      logToServer('Publisher-Media', 'Acquired getUserMedia SUCCESS', {
+        streamId: stream.id,
+        videoTrack: vTrack ? {
+          id: vTrack.id,
+          label: vTrack.label,
+          readyState: vTrack.readyState,
+          enabled: vTrack.enabled,
+          muted: vTrack.muted,
+          settings: typeof vTrack.getSettings === 'function' ? vTrack.getSettings() : {},
+        } : null,
+        audioTrack: aTrack ? { id: aTrack.id, label: aTrack.label, readyState: aTrack.readyState } : null,
+      });
+
       rawStreamRef.current = stream;
-
-      const rawVideoTracks = stream.getVideoTracks();
-      if (rawVideoTracks.length > 0) {
-        // Setup hidden video element to decode raw camera frames
-        const rawVideo = document.createElement('video');
-        rawVideo.muted = true;
-        rawVideo.playsInline = true;
-        rawVideo.autoplay = true;
-        rawVideo.srcObject = stream;
-        rawVideoRef.current = rawVideo;
-
-        // Dynamic resolution canvas capped at 720p HD (1280x720) for rotation and encoding
-        const canvas = document.createElement('canvas');
-        canvas.width = 1280;
-        canvas.height = 720;
-        const ctx = canvas.getContext('2d', { alpha: false });
-        canvasRef.current = canvas;
-
-        try {
-          await rawVideo.play();
-        } catch (e) {
-          console.warn('[WebRTC Publisher] Hidden raw video auto-play caught:', e);
-        }
-
-        // Adjust canvas resolution once video metadata is loaded, capped strictly at 720p
-        const updateCanvasDims = () => {
-          if (rawVideo.videoWidth && rawVideo.videoHeight) {
-            const maxW = 1280;
-            const maxH = 720;
-            const scale = Math.min(maxW / rawVideo.videoWidth, maxH / rawVideo.videoHeight, 1.0);
-            canvas.width = Math.round(rawVideo.videoWidth * scale);
-            canvas.height = Math.round(rawVideo.videoHeight * scale);
-          }
-        };
-        rawVideo.addEventListener('loadedmetadata', updateCanvasDims);
-        updateCanvasDims();
-
-        // Active frame capture loop: renders camera frames with rotationRef.current applied at full resolution
-        renderLoopActiveRef.current = true;
-        const scheduleFrame = () => {
-          if (!renderLoopActiveRef.current) return;
-          const cw = canvas.width || 1280;
-          const ch = canvas.height || 720;
-          if ('requestVideoFrameCallback' in rawVideo) {
-            rawVideo.requestVideoFrameCallback(() => {
-              if (renderLoopActiveRef.current) {
-                drawRotatedVideoFrame(ctx, rawVideo, cw, ch, rotationRef.current);
-                scheduleFrame();
-              }
-            });
-          } else {
-            requestAnimationFrame(() => {
-              if (renderLoopActiveRef.current) {
-                drawRotatedVideoFrame(ctx, rawVideo, cw, ch, rotationRef.current);
-                scheduleFrame();
-              }
-            });
-          }
-        };
-        scheduleFrame();
-
-        // Capture live high-definition video stream from canvas at 30fps with physically rotated pixels
-        const canvasStream = canvas.captureStream(30);
-        const processedVideoTrack = canvasStream.getVideoTracks()[0];
-
-        // Combine microphone audio with processed high-def video track for WebRTC broadcast
-        const broadcastStream = new MediaStream([
-          ...stream.getAudioTracks(),
-          processedVideoTrack,
-        ]);
-        localStreamRef.current = broadcastStream;
-        setLocalStream(broadcastStream);
-        return broadcastStream;
-      } else {
-        localStreamRef.current = stream;
-        setLocalStream(stream);
-        return stream;
-      }
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      return stream;
     } catch (err) {
+      logToServer('Publisher-Media', 'getUserMedia FAILED', { error: err.name, message: err.message });
       console.error('[WebRTC Publisher] Local device acquisition error:', err);
       setPermissionError(err.message || 'Media permission denied or device not found');
       return null;
@@ -356,6 +288,12 @@ export function useWebRTCStreamer({
     }
     setScreenStream(null);
     setIsScreenSharing(false);
+
+    if (screenTransceiverRef.current) {
+      try {
+        screenTransceiverRef.current.direction = 'inactive';
+      } catch {}
+    }
 
     if (screenSenderRef.current) {
       try {
@@ -418,7 +356,12 @@ export function useWebRTCStreamer({
           onScreenShareEndedRef.current?.();
         };
 
-        // Attach screen track to existing WebRTC screen sender without full renegotiation
+        // Attach screen track to existing WebRTC screen sender
+        if (screenTransceiverRef.current) {
+          try {
+            screenTransceiverRef.current.direction = 'sendonly';
+          } catch {}
+        }
         if (screenSenderRef.current) {
           await screenSenderRef.current.replaceTrack(screenVideoTrack);
           console.log('[WebRTC Publisher] Screen video track attached to WebRTC sender');
@@ -488,8 +431,10 @@ export function useWebRTCStreamer({
     const sfuUrl = getSfuWebSocketUrl();
     const ws = new WebSocket(sfuUrl);
     wsRef.current = ws;
+    logToServer('Publisher-SFU', 'Initiating WebSocket connection to SFU', { sfuUrl, roomId });
 
     ws.onopen = () => {
+      logToServer('Publisher-SFU', 'Signaling WS OPEN -> sending join', { peerId: peerIdRef.current, roomId });
       console.log(`[WebRTC Publisher] Connected to SFU signaling at ${sfuUrl} (${peerIdRef.current})`);
       ws.send(
         JSON.stringify({
@@ -517,12 +462,17 @@ export function useWebRTCStreamer({
             break;
 
           case 'joined': {
+            logToServer('Publisher-SFU', 'Received joined from SFU -> creating offer', { peerId: peerIdRef.current });
             console.log(`[WebRTC Publisher] Registered in room ${roomId} as Publisher (${peerIdRef.current})`);
             await createAndSendOffer();
             break;
           }
 
           case 'answer': {
+            const sdpLines = msg.sdp
+              ? msg.sdp.split('\r\n').filter((l) => l.startsWith('m=') || l.startsWith('a=candidate') || l.startsWith('a=rtpmap')).slice(0, 8).join(' | ')
+              : '';
+            logToServer('Publisher-SFU', 'Received SDP answer from SFU', { sdpSummary: sdpLines });
             if (pcRef.current && msg.sdp) {
               console.log('[WebRTC Publisher] Received SDP answer from SFU');
               await pcRef.current.setRemoteDescription(
@@ -540,6 +490,7 @@ export function useWebRTCStreamer({
           }
 
           case 'error': {
+            logToServer('Publisher-SFU', 'SFU error message received', { error: msg.message });
             console.error('[WebRTC Publisher] SFU signaling error:', msg.message);
             setRtcError(msg.message);
             break;
@@ -551,10 +502,12 @@ export function useWebRTCStreamer({
     };
 
     ws.onerror = (err) => {
+      logToServer('Publisher-SFU', 'Signaling WS error', { error: err?.message || 'WebSocket Error' });
       console.warn('[WebRTC Publisher] SFU signaling WebSocket error:', err);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
+      logToServer('Publisher-SFU', 'Signaling WS closed', { code: e.code, reason: e.reason });
       console.log('[WebRTC Publisher] SFU signaling WebSocket closed');
       clearInterval(pingIntervalRef.current);
       setIsRtcConnected(false);
@@ -597,8 +550,9 @@ export function useWebRTCStreamer({
       // 3. Screen Video Transceiver (Full Resolution)
       const currentScreenTrack = screenStreamRef.current?.getVideoTracks()?.[0] || null;
       const screenTransceiver = pc.addTransceiver(currentScreenTrack || 'video', {
-        direction: 'sendonly',
+        direction: currentScreenTrack ? 'sendonly' : 'inactive',
       });
+      screenTransceiverRef.current = screenTransceiver;
       screenSenderRef.current = screenTransceiver.sender;
       if (currentScreenTrack) {
         try {
@@ -606,9 +560,25 @@ export function useWebRTCStreamer({
         } catch {}
       }
 
+      // Query and log device codec capabilities
+      const senderCodecs = typeof RTCRtpSender.getCapabilities === 'function'
+        ? RTCRtpSender.getCapabilities('video')?.codecs?.map((c) => c.mimeType)
+        : [];
+      logToServer('Publisher-RTC', 'Creating PeerConnection & Transceivers', {
+        audioTrack: audioTrack ? { id: audioTrack.id, readyState: audioTrack.readyState } : null,
+        videoTrack: videoTrack ? { id: videoTrack.id, readyState: videoTrack.readyState, enabled: videoTrack.enabled, muted: videoTrack.muted } : null,
+        supportedVideoCodecs: senderCodecs,
+      });
+
       // Trickle ICE candidates to SFU
       pc.onicecandidate = (e) => {
         if (e.candidate && e.candidate.candidate && ws.readyState === WebSocket.OPEN) {
+          logToServer('Publisher-RTC', 'ICE candidate gathered', {
+            type: e.candidate.type,
+            protocol: e.candidate.protocol,
+            address: e.candidate.address,
+            port: e.candidate.port,
+          });
           ws.send(
             JSON.stringify({
               type: 'candidate',
@@ -625,6 +595,7 @@ export function useWebRTCStreamer({
 
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
+        logToServer('Publisher-RTC', `PeerConnection state -> ${state}`);
         console.log(`[WebRTC Publisher] PeerConnection state: ${state}`);
         if (state === 'connected') {
           setIsRtcConnected(true);
@@ -637,6 +608,7 @@ export function useWebRTCStreamer({
 
       pc.oniceconnectionstatechange = () => {
         const state = pc.iceConnectionState;
+        logToServer('Publisher-RTC', `ICE state -> ${state}`);
         console.log(`[WebRTC Publisher] ICE connection state: ${state}`);
         if (state === 'connected' || state === 'completed') {
           setIsRtcConnected(true);
@@ -645,11 +617,14 @@ export function useWebRTCStreamer({
         }
       };
 
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: false,
-        offerToReceiveVideo: false,
-      });
+      const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+
+      logToServer('Publisher-RTC', 'SDP Offer setLocalDescription SUCCESS', {
+        audioMid: audioTransceiver.mid || '0',
+        videoMid: cameraTransceiver.mid || '1',
+        screenMid: screenTransceiver.mid || '2',
+      });
 
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(
@@ -682,14 +657,9 @@ export function useWebRTCStreamer({
 
     return () => {
       isCleaningUpRef.current = true;
-      renderLoopActiveRef.current = false;
       clearTimeout(reconnectTimeoutRef.current);
       clearInterval(pingIntervalRef.current);
 
-      if (rawVideoRef.current) {
-        rawVideoRef.current.srcObject = null;
-        rawVideoRef.current = null;
-      }
       if (rawStreamRef.current) {
         rawStreamRef.current.getTracks().forEach((t) => t.stop());
         rawStreamRef.current = null;
@@ -710,7 +680,6 @@ export function useWebRTCStreamer({
         audioCtxRef.current.close().catch(() => {});
         audioCtxRef.current = null;
       }
-      canvasRef.current = null;
 
       if (pcRef.current) {
         try { pcRef.current.close(); } catch {}
@@ -737,7 +706,6 @@ export function useWebRTCStreamer({
   // Stop device tracks on page unload
   useEffect(() => {
     const handleUnload = () => {
-      renderLoopActiveRef.current = false;
       if (rawStreamRef.current) {
         rawStreamRef.current.getTracks().forEach((t) => t.stop());
       }
@@ -798,13 +766,23 @@ export function useWebRTCStreamer({
     });
   }, []);
 
-  // Explicit retry media acquisition and reconnect
+  // Explicit retry media acquisition and reconnect from scratch
   const retryWebRTC = useCallback(async () => {
-    renderLoopActiveRef.current = false;
-    if (rawVideoRef.current) {
-      rawVideoRef.current.srcObject = null;
-      rawVideoRef.current = null;
+    logToServer('Publisher-RTC', 'Broadcaster triggered restart connection from scratch');
+    setIsRtcConnected(false);
+    setRtcError(null);
+
+    // 1. Terminate old PeerConnection and WebSocket
+    if (pcRef.current) {
+      try { pcRef.current.close(); } catch {}
+      pcRef.current = null;
     }
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch {}
+      wsRef.current = null;
+    }
+
+    // 2. Stop and release previous media tracks
     if (rawStreamRef.current) {
       rawStreamRef.current.getTracks().forEach((t) => t.stop());
       rawStreamRef.current = null;
@@ -813,8 +791,8 @@ export function useWebRTCStreamer({
       localStreamRef.current.getTracks().forEach((t) => t.stop());
       localStreamRef.current = null;
     }
-    canvasRef.current = null;
 
+    // 3. Acquire fresh media and establish fresh SFU peer connection
     const stream = await acquireMedia();
     if (stream) {
       connectSFU(stream);
@@ -838,5 +816,6 @@ export function useWebRTCStreamer({
     toggleMic,
     toggleVideo,
     retryWebRTC,
+    restartConnection: retryWebRTC,
   };
 }

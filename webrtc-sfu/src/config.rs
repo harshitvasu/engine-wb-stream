@@ -54,14 +54,23 @@ impl Config {
             .parse()
             .unwrap_or(40000);
 
-        let lan_ip = Self::detect_lan_ip();
-
+        let detected_lan = Self::detect_lan_ip();
         let env_public: Option<IpAddr> = std::env::var("SFU_PUBLIC_IP").ok().and_then(|s| s.parse().ok());
 
         let public_ip = match env_public {
             Some(ip) if !ip.is_loopback() => ip,
-            _ => lan_ip.unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+            _ => detected_lan.unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
         };
+
+        // If lan_ip detection yielded None but public_ip is a non-loopback address (e.g. 192.168.1.6),
+        // use it as lan_ip so Wi-Fi candidates and UDP packet routing match
+        let lan_ip = detected_lan.or_else(|| {
+            if !public_ip.is_loopback() {
+                Some(public_ip)
+            } else {
+                None
+            }
+        });
 
         Self {
             signaling_host,
@@ -121,7 +130,6 @@ impl Config {
         SocketAddr::new(self.public_ip, self.udp_port)
     }
 
-    #[allow(dead_code)]
     pub fn lan_media_addr(&self) -> Option<SocketAddr> {
         self.lan_ip.map(|ip| SocketAddr::new(ip, self.udp_port))
     }

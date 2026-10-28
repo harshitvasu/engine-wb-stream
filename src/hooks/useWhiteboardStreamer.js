@@ -228,10 +228,22 @@ export function useWhiteboardStreamer({ roomId = 'default', initialBatchInterval
       clearInterval(metricsTimer);
       clearTimeout(reconnectTimeoutRef.current);
       if (wsRef.current) {
-        wsRef.current.close();
+        try {
+          if (wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(
+              JSON.stringify({
+                type: 'leave',
+                role: 'broadcaster',
+                roomId,
+              })
+            );
+          }
+          wsRef.current.close();
+        } catch {}
+        wsRef.current = null;
       }
     };
-  }, [connect]);
+  }, [connect, roomId]);
 
   // Retry write connection handler
   const retryConnection = useCallback(() => {

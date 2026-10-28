@@ -1,5 +1,31 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getSfuWebSocketUrl } from '../config/constants';
+import { logToServer } from '../utils/remoteLogger';
+
+/**
+ * Prioritizes H.264 video codec on an RTCRtpTransceiver.
+ * iPad and Safari strictly require H.264 for hardware-accelerated video encoding and decoding.
+ * Aligning codecs across broadcaster and subscribers prevents codec mismatch in the SFU router.
+ */
+function prioritizeH264(transceiver) {
+  if (!transceiver || typeof transceiver.setCodecPreferences !== 'function') return;
+  try {
+    const kind = transceiver.receiver?.track?.kind || 'video';
+    const capabilities =
+      (typeof RTCRtpReceiver.getCapabilities === 'function' && RTCRtpReceiver.getCapabilities(kind)) ||
+      (typeof RTCRtpSender.getCapabilities === 'function' && RTCRtpSender.getCapabilities(kind));
+    if (!capabilities || !capabilities.codecs) return;
+
+    const codecs = capabilities.codecs;
+    const h264Codecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/h264');
+    const otherCodecs = codecs.filter((c) => !c.mimeType || c.mimeType.toLowerCase() !== 'video/h264');
+    if (h264Codecs.length > 0) {
+      transceiver.setCodecPreferences([...h264Codecs, ...otherCodecs]);
+    }
+  } catch (err) {
+    console.warn('[WebRTC Subscriber] prioritizeH264 error:', err);
+  }
+}
 
 /**
  * Custom hook for Viewers / Subscribers to:
@@ -96,6 +122,7 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
             break;
 
           case 'joined': {
+            logToServer('Subscriber-SFU', 'Joined room as Subscriber -> creating offer', { roomId });
             console.log(`[WebRTC Subscriber] Registered in room ${roomId}`);
             await createAndSendOffer();
             break;
@@ -103,6 +130,7 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
 
           case 'answer': {
             if (pcRef.current && msg.sdp) {
+              logToServer('Subscriber-SFU', 'Received SDP answer from SFU');
               console.log('[WebRTC Subscriber] Received SDP answer from SFU');
               await pcRef.current.setRemoteDescription(
                 new RTCSessionDescription({ type: 'answer', sdp: msg.sdp })
@@ -122,6 +150,11 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
           }
 
           case 'tracks_available': {
+            logToServer('Subscriber-SFU', 'Tracks available notification from SFU', {
+              audio: msg.audio,
+              video: msg.video,
+              screen: msg.screen,
+            });
             console.log('[WebRTC Subscriber] Tracks available notification from SFU:', msg);
             if (typeof msg.audio === 'boolean') setHasAudioTrack(msg.audio);
             if (typeof msg.video === 'boolean') setHasVideoTrack(msg.video);
@@ -299,6 +332,12 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
           const audioTracks = audioStreamRef.current.getAudioTracks();
 
           if (isCamera) {
+            logToServer('Subscriber-RTC', 'Attached inbound track to cameraStream', {
+              trackId: e.track.id,
+              mid,
+              readyState: e.track.readyState,
+              muted: e.track.muted,
+            });
             console.log('[WebRTC Subscriber] Attached to cameraStream');
             cameraStreamRef.current.getTracks().forEach((t) => {
               if (t.id !== e.track.id) cameraStreamRef.current.removeTrack(t);
@@ -311,6 +350,12 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
             requestKeyframe('video');
             setTimeout(() => requestKeyframe('video'), 800);
           } else {
+            logToServer('Subscriber-RTC', 'Attached inbound track to screenStream', {
+              trackId: e.track.id,
+              mid,
+              readyState: e.track.readyState,
+              muted: e.track.muted,
+            });
             console.log('[WebRTC Subscriber] Attached to screenStream');
             screenStreamRef.current.getTracks().forEach((t) => {
               if (t.id !== e.track.id) screenStreamRef.current.removeTrack(t);
@@ -324,6 +369,7 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
           }
 
           e.track.onended = () => {
+            logToServer('Subscriber-RTC', `Inbound track ended: kind=${kind}`);
             if (isCamera) setHasVideoTrack(false);
             else setHasScreenTrack(false);
           };
@@ -348,6 +394,7 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
 
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
+        logToServer('Subscriber-RTC', `PeerConnection state -> ${state}`);
         console.log(`[WebRTC Subscriber] Connection state: ${state}`);
         if (state === 'connected') {
           setIsRtcConnected(true);
@@ -361,6 +408,7 @@ export function useWebRTCViewer({ roomId = 'default', autoStart = true } = {}) {
 
       pc.oniceconnectionstatechange = () => {
         const state = pc.iceConnectionState;
+        logToServer('Subscriber-RTC', `ICE state -> ${state}`);
         console.log(`[WebRTC Subscriber] ICE state: ${state}`);
         if (state === 'connected' || state === 'completed') {
           setIsRtcConnected(true);

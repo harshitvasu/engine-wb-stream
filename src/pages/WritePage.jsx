@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { TopToolbar } from '../components/TopToolbar';
 import { WhiteboardCanvas } from '../components/WhiteboardCanvas';
 import { ScreenShareView } from '../components/ScreenShareView';
@@ -7,9 +7,12 @@ import { FullVideoView } from '../components/FullVideoView';
 import { PublisherVideoThumbnail } from '../components/PublisherVideoThumbnail';
 import { useWhiteboardStreamer } from '../hooks/useWhiteboardStreamer';
 import { useWebRTCStreamer } from '../hooks/useWebRTCStreamer';
-import { ShieldAlert, RotateCcw, Radio } from 'lucide-react';
+import { ShieldAlert, RotateCcw, Radio, Home } from 'lucide-react';
 
 export function WritePage() {
+  const { roomId: urlRoomId } = useParams();
+  const roomId = urlRoomId || 'default';
+
   const containerRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isExcalidrawMenuVisible, setIsExcalidrawMenuVisible] = useState(false);
@@ -65,7 +68,7 @@ export function WritePage() {
     handleExcalidrawChange,
     handlePointerDown,
     handlePointerUp,
-  } = useWhiteboardStreamer({ roomId: 'default' });
+  } = useWhiteboardStreamer({ roomId });
 
   const handleScreenShareEnded = useCallback(() => {
     broadcastShareMode('whiteboard');
@@ -89,7 +92,7 @@ export function WritePage() {
     toggleVideo,
     retryWebRTC,
   } = useWebRTCStreamer({
-    roomId: 'default',
+    roomId,
     autoStart: !writeError,
     activeShareMode,
     onScreenShareEnded: handleScreenShareEnded,
@@ -131,6 +134,7 @@ export function WritePage() {
     >
       {/* 1. Single Unified Top Toolbar with Presentation Mode Selector */}
       <TopToolbar
+        roomId={roomId}
         isConnected={isConnected && !writeError}
         viewersCount={metrics.viewersCount}
         currentZoom={currentZoom}
@@ -148,6 +152,7 @@ export function WritePage() {
         onSelectShareMode={handleSelectShareMode}
         isScreenSharing={isScreenSharing}
         onToggleScreenShare={toggleScreenShare}
+        clearCanvas={clearCanvas}
       />
 
       {/* 2. Error Screen when 2nd write window tries to open, or Active Presentation Stage */}
@@ -160,19 +165,23 @@ export function WritePage() {
               </div>
               <h2 className="error-title">Write Window Limit Reached</h2>
               <p className="error-message">
-                Only <strong>one write window</strong> is allowed to be open at a time. Another write window is already active and broadcasting.
+                Only <strong>one write window</strong> is allowed to be open at a time in room <strong>{roomId}</strong>. Another write window is already active and broadcasting.
               </p>
               <div className="error-tips">
-                <span>To edit the whiteboard here, please close the other write window first, then click below. Multiple stream viewers can watch at <strong>/stream</strong>.</span>
+                <span>To edit the whiteboard here, please close the other write window first, or start a new room in the lobby. Multiple stream viewers can watch live at <strong>/stream/{roomId}</strong>.</span>
               </div>
               <div className="error-actions">
                 <button onClick={retryConnection} className="error-btn-primary">
                   <RotateCcw size={14} />
                   <span>Retry Connection</span>
                 </button>
-                <Link to="/stream" className="error-btn-secondary">
+                <Link to={`/stream/${roomId}`} className="error-btn-secondary">
                   <Radio size={14} />
                   <span>Watch Stream Instead</span>
+                </Link>
+                <Link to="/" className="error-btn-secondary">
+                  <Home size={14} />
+                  <span>Lobby / New Room</span>
                 </Link>
               </div>
             </div>
@@ -223,13 +232,12 @@ export function WritePage() {
           isConnected={isRtcConnected}
           isMicMuted={isMicMuted}
           isVideoDisabled={isVideoDisabled}
-          isScreenSharing={isScreenSharing}
-          onToggleScreenShare={toggleScreenShare}
           rotation={videoRotation}
           onRotate={handleRotateVideo}
           onToggleMic={toggleMic}
           onToggleVideo={toggleVideo}
           onRetryMedia={retryWebRTC}
+          onRestartConnection={retryWebRTC}
           error={permissionError || rtcError}
         />
       )}

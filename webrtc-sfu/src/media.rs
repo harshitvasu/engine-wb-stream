@@ -55,6 +55,15 @@ impl MediaRouter {
                     metrics.inc_errors();
                     debug!("[Sub {}] Failed to write frame: {:?}", sub_id, e);
                 } else {
+                    if is_audio {
+                        sub.stats.audio_frames_out += 1;
+                    } else if is_video {
+                        sub.stats.video_frames_out += 1;
+                    } else {
+                        sub.stats.screen_frames_out += 1;
+                    }
+                    sub.stats.last_frame_time = Some(std::time::Instant::now());
+
                     // Drain subscriber's outputs for any generated transmits
                     let mut dummy_frames = Vec::new();
                     let mut dummy_keyframe = false;

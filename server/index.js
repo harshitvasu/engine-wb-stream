@@ -130,13 +130,62 @@ app.get('/api/stats', (req, res) => {
 
 app.get('/api/room/:roomId', (req, res) => {
   const room = getOrCreateRoom(req.params.roomId);
-  res.json(room.getObservabilityMetrics());
+  const metrics = room.getObservabilityMetrics();
+  res.json({
+    ...metrics,
+    inUse: room.isBroadcasterActive(),
+  });
+});
+
+app.get('/api/room/:roomId/status', (req, res) => {
+  const roomId = req.params.roomId;
+  const room = rooms.get(roomId);
+  const inUse = Boolean(room && room.isBroadcasterActive());
+  res.json({
+    roomId,
+    inUse,
+    broadcasterConnected: inUse,
+    viewersCount: room ? room.viewers.size : 0,
+    elementCount: room ? room.elementsMap.size : 0,
+  });
+});
+
+app.post('/__client_log', (req, res) => {
+  const data = req.body || {};
+  const tag = data.tag || 'CLIENT';
+  const ua = data.ua || 'Browser';
+  const time = data.time || '';
+  const msg = data.msg || '';
+  const details = data.details && Object.keys(data.details).length > 0 ? JSON.stringify(data.details) : '';
+  const colorUa = ua.includes('iPad') ? '\x1b[35m' : '\x1b[36m';
+  console.log(`\x1b[90m[${time}]\x1b[0m ${colorUa}[${ua}]\x1b[0m \x1b[33m[${tag}]\x1b[0m \x1b[1m${msg}\x1b[0m \x1b[32m${details}\x1b[0m`);
+  res.json({ ok: true });
 });
 
 app.post('/api/room/:roomId/reset', (req, res) => {
   const room = getOrCreateRoom(req.params.roomId);
   room.clear();
   res.json({ status: 'cleared', roomId: room.id, revision: room.revision });
+});
+
+// Proxy SFU dashboard and REST API directly to WebRTC SFU (port 3088)
+app.use('/sfu', async (req, res) => {
+  const sfuPort = process.env.SFU_PORT || 3088;
+  const targetPath = req.url === '/' ? '/dashboard' : req.url;
+  try {
+    const sfuRes = await fetch(`http://127.0.0.1:${sfuPort}${targetPath}`);
+    const contentType = sfuRes.headers.get('content-type') || 'text/plain';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const body = await sfuRes.text();
+    res.status(sfuRes.status).send(body);
+  } catch (err) {
+    res.status(502).json({ error: 'SFU unreachable', details: err.message });
+  }
+});
+
+app.get('/sfu-dashboard', (req, res) => {
+  res.redirect('/sfu/dashboard');
 });
 
 // =========================================================================
@@ -176,7 +225,7 @@ wss.on('connection', (ws, req) => {
 
           if (role === 'broadcaster') {
             // Enforce Single-Write Window constraint
-            if (currentRoom.broadcaster && currentRoom.broadcaster.ws.readyState === WebSocket.OPEN && currentRoom.broadcaster.ws !== ws) {
+            if (currentRoom.isBroadcasterActive() && currentRoom.broadcaster.ws !== ws) {
               console.log(`[Write Limit] Rejected write connection for room ${roomId} - another write window is already active.`);
               ws.send(
                 JSON.stringify({
@@ -187,6 +236,11 @@ wss.on('connection', (ws, req) => {
               );
               ws.close(4002, 'Broadcaster limit exceeded');
               return;
+            }
+
+            // Clean up any previous broadcaster session
+            if (currentRoom.broadcaster && currentRoom.broadcaster.ws !== ws) {
+              currentRoom.removeBroadcaster();
             }
 
             session = new ClientSession(ws, 'broadcaster', roomId);
@@ -248,6 +302,19 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'leave': {
+          if (session && currentRoom) {
+            if (session.role === 'broadcaster') {
+              currentRoom.removeBroadcaster();
+              console.log(`[Broadcaster Released] Broadcaster left room ${currentRoom.id}`);
+            } else {
+              currentRoom.removeViewer(session.id);
+            }
+            currentRoom.broadcastPresence();
+          }
+          break;
+        }
+
         case 'clear': {
           if (currentRoom) {
             currentRoom.clear();
@@ -274,14 +341,20 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
-    if (session && currentRoom) {
-      session.close();
-      if (session.role === 'broadcaster') {
-        currentRoom.removeBroadcaster();
-      } else {
-        currentRoom.removeViewer(session.id);
+    // Ensure broadcaster release if this socket was the registered broadcaster
+    for (const [rId, room] of rooms.entries()) {
+      if (room.broadcaster && (room.broadcaster.ws === ws || room.broadcaster === session)) {
+        room.removeBroadcaster();
+        room.broadcastPresence();
+        console.log(`[Broadcaster Released] Released broadcaster on socket close for room ${rId}`);
       }
-      currentRoom.broadcastPresence();
+      if (session && room.viewers.has(session.id)) {
+        room.removeViewer(session.id);
+        room.broadcastPresence();
+      }
+    }
+    if (session) {
+      session.close();
     }
   });
 });

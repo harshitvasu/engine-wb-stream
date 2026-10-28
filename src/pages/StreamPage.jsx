@@ -1,4 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { useParams } from 'react-router-dom';
 import { Excalidraw } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
 import { Sliders, Minimize2 } from 'lucide-react';
@@ -44,6 +45,9 @@ const MemoizedStreamCanvas = React.memo(function MemoizedStreamCanvas({ onMount,
 });
 
 export function StreamPage() {
+  const { roomId: urlRoomId } = useParams();
+  const roomId = urlRoomId || 'default';
+
   const {
     setExcalidrawAPI,
     isConnected,
@@ -58,7 +62,7 @@ export function StreamPage() {
     resetControlsToDefaults,
     activeShareMode,
     videoRotation,
-  } = useWhiteboardViewer({ roomId: 'default' });
+  } = useWhiteboardViewer({ roomId });
 
   const {
     cameraStream,
@@ -74,7 +78,7 @@ export function StreamPage() {
     toggleAudioMute,
     setVolume,
     requestKeyframe,
-  } = useWebRTCViewer({ roomId: 'default' });
+  } = useWebRTCViewer({ roomId });
 
   const [isControlsOpen, setIsControlsOpen] = useState(false);
   // Default load in fullscreen mode as requested (R2)
@@ -188,6 +192,7 @@ export function StreamPage() {
     <div className={`page-layout ${isFullscreen ? 'stream-fullscreen' : ''}`} ref={containerRef}>
       {/* 1. Single Unified Top Toolbar (Displays broadcaster live mode with no viewer controls) */}
       <TopToolbar
+        roomId={roomId}
         isConnected={isConnected}
         viewersCount={metrics.viewersCount}
         isStream={true}

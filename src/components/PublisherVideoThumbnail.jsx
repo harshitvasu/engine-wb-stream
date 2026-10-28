@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
+import { logToServer } from '../utils/remoteLogger';
 import {
   Mic,
   MicOff,
@@ -12,7 +13,6 @@ import {
   RotateCcw,
   RotateCw,
   User,
-  Monitor,
 } from 'lucide-react';
 
 export function PublisherVideoThumbnail({
@@ -30,6 +30,7 @@ export function PublisherVideoThumbnail({
   onToggleMic,
   onToggleVideo,
   onRetryMedia,
+  onRestartConnection,
   isAudioMuted = false,
   onToggleAudioMute,
   volume = 1.0,
@@ -41,11 +42,36 @@ export function PublisherVideoThumbnail({
   const [isMinimized, setIsMinimized] = useState(false);
   const [isAutoplayBlocked, setIsAutoplayBlocked] = useState(false);
   const [internalRotation, setInternalRotation] = useState(0);
+  const [isRestarting, setIsRestarting] = useState(false);
   const [, setTrackState] = useState(0);
   const [thumbnailResText, setThumbnailResText] = useState('360p');
 
+  const handleRestart = onRestartConnection || onRetryMedia;
+
+  const handleRestartClick = async (e) => {
+    e.stopPropagation();
+    if (isRestarting) return;
+    setIsRestarting(true);
+    try {
+      if (handleRestart) {
+        await handleRestart();
+      }
+    } finally {
+      setTimeout(() => setIsRestarting(false), 800);
+    }
+  };
+
   const currentRotation = rotation !== undefined ? rotation : internalRotation;
   const handleRotate = onRotate || (() => setInternalRotation((prev) => prev + 90));
+
+  const isRotatedSideways = currentRotation % 180 !== 0;
+  const rotationStyle = currentRotation
+    ? {
+        transform: `rotate(${currentRotation}deg)${isRotatedSideways ? ' scale(0.5625)' : ''}`,
+        transformOrigin: 'center center',
+        transition: 'transform 0.2s ease',
+      }
+    : undefined;
 
   // Dynamically detect thumbnail video resolution from stream
   useEffect(() => {
@@ -54,6 +80,11 @@ export function PublisherVideoThumbnail({
 
     const updateRes = () => {
       if (video.videoWidth && video.videoHeight) {
+        logToServer('Thumbnail-Video', 'video metadata loaded', {
+          isPublisher,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+        });
         const h = Math.min(video.videoWidth, video.videoHeight);
         if (h <= 240) setThumbnailResText('240p');
         else if (h <= 360) setThumbnailResText('360p');
@@ -104,15 +135,31 @@ export function PublisherVideoThumbnail({
     if (stream) {
       if (video.srcObject !== stream) {
         video.srcObject = stream;
+        logToServer('Thumbnail-Video', 'Attached stream to video.srcObject', {
+          isPublisher,
+          streamId: stream.id,
+          videoTracks: stream.getVideoTracks().map((t) => ({ id: t.id, readyState: t.readyState, enabled: t.enabled })),
+        });
       }
       video
         .play()
         .then(() => {
+          logToServer('Thumbnail-Video', 'video.play() SUCCESS', {
+            isPublisher,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            paused: video.paused,
+          });
           if (!isPublisher && !video.muted) {
             setIsAutoplayBlocked(false);
           }
         })
         .catch((err) => {
+          logToServer('Thumbnail-Video', 'video.play() CAUGHT ERROR', {
+            isPublisher,
+            errorName: err.name,
+            errorMessage: err.message,
+          });
           if (!isPublisher && (err.name === 'NotAllowedError' || err.name === 'AbortError')) {
             console.warn('[WebRTC Audio/Video] Autoplay blocked by browser policy. Playing muted until tapped:', err);
             setIsAutoplayBlocked(true);
@@ -166,6 +213,18 @@ export function PublisherVideoThumbnail({
     (hasVideoTrack !== null ? hasVideoTrack : stream.getVideoTracks().length > 0) &&
     !isVideoDisabled;
 
+  useEffect(() => {
+    logToServer('Thumbnail-Badge', `Thumbnail badge: ${isConnected ? 'LIVE' : 'CONNECTING'}`, {
+      isPublisher,
+      isConnected,
+      badge: isConnected ? 'LIVE' : 'CONNECTING',
+      hasVideo,
+      hasVideoTrack,
+      isVideoDisabled,
+      hasStream: !!stream,
+    });
+  }, [isPublisher, isConnected, hasVideo, hasVideoTrack, isVideoDisabled, !!stream]);
+
   return (
     <div
       className={`floating-media-card ${isMinimized ? 'minimized' : ''} ${
@@ -191,16 +250,17 @@ export function PublisherVideoThumbnail({
         </div>
 
         <div className="media-card-actions">
-          {/* Quick 90° clockwise video rotate button: Publisher ONLY */}
-          {isPublisher && onRotate && (
+          {/* Restart WebRTC Connection & Streaming from scratch: Broadcaster ONLY */}
+          {isPublisher && handleRestart && (
             <button
               type="button"
-              onClick={handleRotate}
-              className="media-card-btn icon-only rotate-btn"
-              title={`Rotate Video 90° (Current: ${currentRotation % 360}°)`}
-              aria-label="Rotate Video 90 degrees"
+              onClick={handleRestartClick}
+              disabled={isRestarting}
+              className={`media-card-btn icon-only restart-btn ${isRestarting ? 'restarting' : ''}`}
+              title="Restart WebRTC connection & stream to all subscribers from scratch"
+              aria-label="Restart connection"
             >
-              <RotateCw size={11} />
+              <RefreshCw size={11} className={isRestarting ? 'spin-animation' : ''} />
             </button>
           )}
 
@@ -239,6 +299,7 @@ export function PublisherVideoThumbnail({
               webkit-playsinline="true"
               x5-playsinline="true"
               muted={isPublisher}
+              style={rotationStyle}
               className={`video-element ${!hasVideo ? 'video-invisible' : ''}`}
             />
 
@@ -310,18 +371,6 @@ export function PublisherVideoThumbnail({
                   {isVideoDisabled ? <VideoOff size={13} /> : <VideoIcon size={13} />}
                   <span>{isVideoDisabled ? 'Cam Off' : 'Cam On'}</span>
                 </button>
-
-                {onToggleScreenShare && (
-                  <button
-                    type="button"
-                    onClick={onToggleScreenShare}
-                    className={`ctrl-btn ${isScreenSharing ? 'active-share' : ''}`}
-                    title={isScreenSharing ? 'Stop Screen Sharing' : 'Share Screen (WebRTC SFU)'}
-                  >
-                    <Monitor size={13} className={isScreenSharing ? 'text-blue-400' : ''} />
-                    <span>{isScreenSharing ? 'Stop Screen' : 'Share Screen'}</span>
-                  </button>
-                )}
 
                 <button
                   type="button"

@@ -61,6 +61,19 @@ export class RoomState {
   }
 
   /**
+   * Returns true if there is an active broadcaster with an open WebSocket.
+   * If the broadcaster's socket is closed or dead, cleans it up immediately.
+   */
+  isBroadcasterActive() {
+    if (!this.broadcaster) return false;
+    if (!this.broadcaster.ws || this.broadcaster.ws.readyState !== 1) { // 1 = WebSocket.OPEN
+      this.broadcaster = null;
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Adds a viewer session with automatic snapshot resync callback.
    */
   addViewer(session) {
@@ -88,7 +101,7 @@ export class RoomState {
       timestamp: Date.now(),
       stats: {
         viewersCount: this.viewers.size,
-        broadcastersCount: this.broadcaster ? 1 : 0,
+        broadcastersCount: this.isBroadcasterActive() ? 1 : 0,
       },
     };
   }
@@ -154,16 +167,17 @@ export class RoomState {
    * Broadcasts presence information to all clients.
    */
   broadcastPresence() {
+    const isBroadcasterAlive = this.isBroadcasterActive();
     const presenceMsg = {
       type: 'presence',
       roomId: this.id,
       viewersCount: this.viewers.size,
-      broadcastersCount: this.broadcaster ? 1 : 0,
+      broadcastersCount: isBroadcasterAlive ? 1 : 0,
       revision: this.revision,
     };
     const raw = JSON.stringify(presenceMsg);
 
-    if (this.broadcaster) {
+    if (isBroadcasterAlive && this.broadcaster) {
       this.broadcaster.enqueue(presenceMsg, raw, DeliveryClass.RELIABLE);
     }
     for (const viewer of this.viewers.values()) {
@@ -346,7 +360,7 @@ export class RoomState {
       revision: this.revision,
       elementCount: this.elementsMap.size,
       viewersCount: viewerCount,
-      broadcasterConnected: Boolean(this.broadcaster),
+      broadcasterConnected: this.isBroadcasterActive(),
       queueStats: {
         minDepth: minQueueDepth,
         avgDepth: Number(avgQueueDepth),

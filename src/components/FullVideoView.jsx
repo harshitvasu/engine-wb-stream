@@ -26,6 +26,15 @@ export function FullVideoView({
   const [isAutoplayBlocked, setIsAutoplayBlocked] = useState(false);
   const [resolutionText, setResolutionText] = useState('720p HD');
 
+  const isRotatedSideways = rotation % 180 !== 0;
+  const rotationStyle = rotation
+    ? {
+        transform: `rotate(${rotation}deg)${isRotatedSideways ? ' scale(0.65)' : ''}`,
+        transformOrigin: 'center center',
+        transition: 'transform 0.2s ease',
+      }
+    : undefined;
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -174,6 +183,7 @@ export function FullVideoView({
               webkit-playsinline="true"
               x5-playsinline="true"
               muted={isPublisher || isMuted}
+              style={rotationStyle}
               className={`full-video-element ${!hasVideoTrack ? 'video-invisible' : ''}`}
             />
 

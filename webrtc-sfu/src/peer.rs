@@ -8,6 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
 
 use crate::config::Config;
+use crate::dashboard::{PeerSnapshot, PeerStats};
 use crate::signaling::{CandidatePayload, ServerMessage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,11 @@ pub struct PeerSession {
     pub ws_sender: Option<UnboundedSender<ServerMessage>>,
     pub is_connected: bool,
     pub next_timeout: Instant,
+    pub ice_state: String,
+    pub remote_addr: Option<SocketAddr>,
+    pub stats: PeerStats,
+    #[allow(dead_code)]
+    pub created_at: Instant,
 }
 
 impl PeerSession {
@@ -56,7 +62,14 @@ impl PeerSession {
         ws_sender: Option<UnboundedSender<ServerMessage>>,
     ) -> Result<Self, anyhow::Error> {
         let now = Instant::now();
-        let mut rtc = Rtc::builder().build(now);
+        let mut rtc = Rtc::builder()
+            .clear_codecs()
+            .enable_opus(true, false)
+            .enable_h264(true)
+            .enable_vp8(true)
+            .enable_vp9(true)
+            .enable_av1(true)
+            .build(now);
 
         // 1. Always add loopback candidate (127.0.0.1:udp_port) for local browser connections on same machine
         let loopback_addr = SocketAddr::new(
@@ -98,6 +111,10 @@ impl PeerSession {
             ws_sender,
             is_connected: false,
             next_timeout: now,
+            ice_state: "New".to_string(),
+            remote_addr: None,
+            stats: PeerStats::default(),
+            created_at: now,
         })
     }
 
@@ -185,6 +202,7 @@ impl PeerSession {
 
     /// Request a video or screen keyframe (PLI) from this publisher
     pub fn request_keyframe(&mut self, kind: Option<&str>) {
+        self.stats.keyframe_requests += 1;
         let req_video = kind.is_none() || kind == Some("video") || kind == Some("all");
         let req_screen = kind.is_none() || kind == Some("screen") || kind == Some("all");
 
@@ -221,21 +239,32 @@ impl PeerSession {
         while let Ok(output) = self.rtc.poll_output() {
             match output {
                 Output::Transmit(t) => {
+                    self.stats.bytes_out += t.contents.len() as u64;
+                    self.stats.packets_out += 1;
                     transmits.push(t);
                 }
                 Output::Event(event) => match event {
                     Event::Connected => {
                         info!("[Peer {} ({:?})] WebRTC Peer Connection ESTABLISHED!", self.peer_id, self.role);
                         self.is_connected = true;
+                        self.ice_state = "Connected".to_string();
                     }
                     Event::IceConnectionStateChange(state) => {
                         info!("[Peer {}] ICE state change: {:?}", self.peer_id, state);
+                        self.ice_state = format!("{:?}", state);
+                        let s = self.ice_state.to_lowercase();
+                        if s.contains("connected") || s.contains("completed") {
+                            self.is_connected = true;
+                        } else if s.contains("disconnected") || s.contains("failed") {
+                            self.is_connected = false;
+                        }
                     }
                     Event::MediaData(data) => {
                         media_frames.push(data);
                     }
                     Event::KeyframeRequest(req) => {
                         debug!("[Peer {}] Received KeyframeRequest: {:?}", self.peer_id, req);
+                        self.stats.keyframe_requests += 1;
                         *keyframe_requested = true;
                     }
                     _ => {}
@@ -245,6 +274,22 @@ impl PeerSession {
                     break;
                 }
             }
+        }
+    }
+
+    /// Convert this peer's live WebRTC state into a diagnostic snapshot for the dashboard
+    pub fn to_snapshot(&self, now: Instant) -> PeerSnapshot {
+        PeerSnapshot {
+            peer_id: self.peer_id.clone(),
+            role: self.role.as_str().to_string(),
+            remote_addr: self.remote_addr.map(|a| a.to_string()),
+            is_connected: self.is_connected,
+            ice_state: self.ice_state.clone(),
+            ws_connected: self.ws_sender.is_some(),
+            audio_mid: self.audio_mid.map(|m| m.to_string()),
+            video_mid: self.video_mid.map(|m| m.to_string()),
+            screen_mid: self.screen_mid.map(|m| m.to_string()),
+            stats: self.stats.snapshot(now),
         }
     }
 

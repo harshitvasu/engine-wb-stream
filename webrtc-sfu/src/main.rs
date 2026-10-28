@@ -8,10 +8,11 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
+mod dashboard;
 mod media;
 mod metrics;
 mod peer;
@@ -19,6 +20,7 @@ mod rooms;
 mod signaling;
 
 use config::Config;
+use dashboard::render_dashboard_html;
 use metrics::Metrics;
 use rooms::RoomManager;
 use signaling::{ClientMessage, ServerMessage};
@@ -64,7 +66,9 @@ async fn main() -> Result<()> {
                         }
 
                         for t in transmits {
-                            let _ = socket.send_to(&t.contents, t.destination).await;
+                            if let Err(e) = socket.send_to(&t.contents, t.destination).await {
+                                debug!("[UDP Ingress] send_to {} failed: {:?}", t.destination, e);
+                            }
                         }
                     }
                     Err(e) => {
@@ -92,15 +96,20 @@ async fn main() -> Result<()> {
                 }
 
                 for t in transmits {
-                    let _ = socket.send_to(&t.contents, t.destination).await;
+                    if let Err(e) = socket.send_to(&t.contents, t.destination).await {
+                        debug!("[UDP Timer] send_to {} failed: {:?}", t.destination, e);
+                    }
                 }
             }
         });
     }
 
-    // 4. Start WebSocket Signaling Server
+    // 4. Start HTTP & WebSocket Signaling Server
+    let start_time = Instant::now();
     let listener = TcpListener::bind(config.signaling_addr()).await?;
     info!("🚀 WebRTC SFU ready and accepting connections!");
+    info!("📊 SFU Live Dashboard: http://{}/dashboard", config.signaling_addr());
+    info!("📡 SFU Live JSON API:  http://{}/api/rooms", config.signaling_addr());
 
     loop {
         match listener.accept().await {
@@ -108,8 +117,8 @@ async fn main() -> Result<()> {
                 let manager = room_manager.clone();
                 let socket = udp_socket.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_ws_connection(stream, peer_addr, manager, socket).await {
-                        warn!("WebSocket connection error from {}: {:?}", peer_addr, e);
+                    if let Err(e) = handle_connection(stream, peer_addr, manager, socket, start_time).await {
+                        debug!("Connection handled or closed from {}: {:?}", peer_addr, e);
                     }
                 });
             }
@@ -118,6 +127,108 @@ async fn main() -> Result<()> {
             }
         }
     }
+}
+
+async fn handle_connection(
+    stream: tokio::net::TcpStream,
+    peer_addr: SocketAddr,
+    manager: Arc<Mutex<RoomManager>>,
+    udp_socket: Arc<UdpSocket>,
+    start_time: Instant,
+) -> Result<()> {
+    let mut peek_buf = [0u8; 1024];
+    let n = stream.peek(&mut peek_buf).await?;
+    let peek_str = String::from_utf8_lossy(&peek_buf[..n]);
+
+    let is_ws = peek_str.to_lowercase().contains("upgrade: websocket");
+
+    if is_ws {
+        handle_ws_connection(stream, peer_addr, manager, udp_socket).await
+    } else {
+        handle_http_connection(stream, peer_addr, manager, start_time).await
+    }
+}
+
+async fn handle_http_connection(
+    mut stream: tokio::net::TcpStream,
+    _peer_addr: SocketAddr,
+    manager: Arc<Mutex<RoomManager>>,
+    start_time: Instant,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut buf = [0u8; 4096];
+    let n = stream.read(&mut buf).await?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let req_str = String::from_utf8_lossy(&buf[..n]);
+    let mut lines = req_str.lines();
+    let req_line = lines.next().unwrap_or("");
+    let parts: Vec<&str> = req_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Ok(());
+    }
+
+    let method = parts[0];
+    let mut path = parts[1];
+    if let Some((p, _)) = path.split_once('?') {
+        path = p;
+    }
+
+    if method == "OPTIONS" {
+        let resp = "HTTP/1.1 204 No Content\r\n\
+                    Access-Control-Allow-Origin: *\r\n\
+                    Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+                    Access-Control-Allow-Headers: *\r\n\
+                    Connection: close\r\n\r\n";
+        stream.write_all(resp.as_bytes()).await?;
+        return Ok(());
+    }
+
+    if path == "/api/rooms" || path == "/rooms" || path == "/status" || path == "/api/status" {
+        let snapshot = {
+            let mgr = manager.lock().await;
+            mgr.get_status_snapshot(start_time)
+        };
+        let json = serde_json::to_string_pretty(&snapshot)?;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        stream.write_all(resp.as_bytes()).await?;
+    } else if path == "/dashboard" || path == "/" || path == "/sfu-dashboard" {
+        let html = render_dashboard_html();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/html; charset=utf-8\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            html.len(),
+            html
+        );
+        stream.write_all(resp.as_bytes()).await?;
+    } else {
+        let body = "Not Found";
+        let resp = format!(
+            "HTTP/1.1 404 Not Found\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(resp.as_bytes()).await?;
+    }
+
+    Ok(())
 }
 
 async fn handle_ws_connection(
@@ -221,7 +332,9 @@ async fn handle_ws_connection(
                                 peer_id,
                             });
                             for t in transmits {
-                                let _ = udp_socket.send_to(&t.contents, t.destination).await;
+                                if let Err(e) = udp_socket.send_to(&t.contents, t.destination).await {
+                                    debug!("[Offer Answer] send_to {} failed: {:?}", t.destination, e);
+                                }
                             }
                         }
                         Err(e) => {
@@ -243,7 +356,9 @@ async fn handle_ws_connection(
                         mgr.handle_candidate(&room_id, &peer_id, &candidate).unwrap_or_default()
                     };
                     for t in transmits {
-                        let _ = udp_socket.send_to(&t.contents, t.destination).await;
+                        if let Err(e) = udp_socket.send_to(&t.contents, t.destination).await {
+                            debug!("[Candidate] send_to {} failed: {:?}", t.destination, e);
+                        }
                     }
                 }
 
@@ -254,7 +369,9 @@ async fn handle_ws_connection(
                         mgr.request_keyframe(&room_id, &peer_id, kind.as_deref())
                     };
                     for t in transmits {
-                        let _ = udp_socket.send_to(&t.contents, t.destination).await;
+                        if let Err(e) = udp_socket.send_to(&t.contents, t.destination).await {
+                            debug!("[Keyframe] send_to {} failed: {:?}", t.destination, e);
+                        }
                     }
                 }
 
