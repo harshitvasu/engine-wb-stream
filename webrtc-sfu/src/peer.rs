@@ -66,9 +66,6 @@ impl PeerSession {
             .clear_codecs()
             .enable_opus(true, false)
             .enable_h264(true)
-            .enable_vp8(true)
-            .enable_vp9(true)
-            .enable_av1(true)
             .build(now);
 
         // 1. Always add loopback candidate (127.0.0.1:udp_port) for local browser connections on same machine
@@ -80,19 +77,19 @@ impl PeerSession {
             rtc.add_local_candidate(cand);
         }
 
-        // 2. Always add LAN candidate (e.g. 192.168.1.12:udp_port) for Wi-Fi/local network clients (iPad, iPhone, etc.)
+        // 2. Add LAN/VPC candidate (e.g. 192.168.1.12:udp_port or 172.31.34.87:udp_port on EC2)
         if let Some(lan_ip) = config.lan_ip {
-            if !lan_ip.is_loopback() {
+            if !lan_ip.is_loopback() && Some(lan_ip) != Some(config.public_ip) {
                 let lan_addr = SocketAddr::new(lan_ip, config.udp_port);
                 if let Ok(cand) = Candidate::host(lan_addr, Protocol::Udp) {
                     rtc.add_local_candidate(cand);
-                    info!("[Peer {}] Registered LAN candidate for Wi-Fi clients: {}", peer_id, lan_addr);
+                    info!("[Peer {}] Registered LAN/VPC candidate: {}", peer_id, lan_addr);
                 }
             }
         }
 
-        // 3. Add public IP candidate if explicitly set and distinct from loopback and LAN
-        if !config.public_ip.is_loopback() && Some(config.public_ip) != config.lan_ip {
+        // 3. Add Public candidate if configured or detected (essential for cellular & internet clients)
+        if !config.public_ip.is_loopback() {
             let pub_addr = config.public_media_addr();
             if let Ok(cand) = Candidate::host(pub_addr, Protocol::Udp) {
                 rtc.add_local_candidate(cand);

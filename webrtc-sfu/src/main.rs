@@ -108,6 +108,10 @@ async fn main() -> Result<()> {
     let start_time = Instant::now();
     let listener = TcpListener::bind(config.signaling_addr()).await?;
     info!("🚀 WebRTC SFU ready and accepting connections!");
+    info!("🌐 Public Media IP:    {}", config.public_media_addr());
+    if let Some(lan) = config.lan_media_addr() {
+        info!("🏠 LAN/VPC Media IP:   {}", lan);
+    }
     info!("📊 SFU Live Dashboard: http://{}/dashboard", config.signaling_addr());
     info!("📡 SFU Live JSON API:  http://{}/api/rooms", config.signaling_addr());
 

@@ -56,8 +56,9 @@ impl Config {
 
         let detected_lan = Self::detect_lan_ip();
         let env_public: Option<IpAddr> = std::env::var("SFU_PUBLIC_IP").ok().and_then(|s| s.parse().ok());
+        let detected_public = env_public.or_else(Self::detect_public_ip);
 
-        let public_ip = match env_public {
+        let public_ip = match detected_public {
             Some(ip) if !ip.is_loopback() => ip,
             _ => detected_lan.unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
         };
@@ -80,6 +81,61 @@ impl Config {
             public_ip,
             lan_ip,
         }
+    }
+
+    /// Checks if an IP is in a private RFC 1918, loopback, or link-local range
+    pub fn is_private_ip(ip: &IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(ipv4) => {
+                let o = ipv4.octets();
+                ipv4.is_loopback()
+                    || o[0] == 10
+                    || (o[0] == 172 && (16..=31).contains(&o[1]))
+                    || (o[0] == 192 && o[1] == 168)
+                    || (o[0] == 169 && o[1] == 254)
+            }
+            IpAddr::V6(ipv6) => ipv6.is_loopback(),
+        }
+    }
+
+    /// Automatically detects public IP address via AWS EC2 Instance Metadata (IMDS) or external echo
+    pub fn detect_public_ip() -> Option<IpAddr> {
+        // 1. AWS EC2 Instance Metadata Service (IMDS) - sub-millisecond latency on EC2
+        #[cfg(unix)]
+        {
+            if let Ok(output) = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("curl -s --connect-timeout 1 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null")
+                .output()
+            {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if let Ok(ip) = text.parse::<IpAddr>() {
+                        if !Self::is_private_ip(&ip) {
+                            return Some(ip);
+                        }
+                    }
+                }
+            }
+
+            // 2. AWS checkip fallback
+            if let Ok(output) = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("curl -s --connect-timeout 2 http://checkip.amazonaws.com 2>/dev/null")
+                .output()
+            {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if let Ok(ip) = text.parse::<IpAddr>() {
+                        if !Self::is_private_ip(&ip) {
+                            return Some(ip);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Automatically detects the active local network (LAN) IP via OS routing table or ifconfig

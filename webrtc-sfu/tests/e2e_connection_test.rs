@@ -653,14 +653,13 @@ async fn test_audio_and_video_forwarding_one_to_many() -> Result<(), Box<dyn std
     assert_eq!(s2_audio[0], audio_payload);
     println!("✓ Phase 3 & 4 Verified: Audio successfully published and forwarded to 2 simultaneous subscribers!");
 
-    // 5. Publisher sends VP8 Video Frame
-    println!("\nBroadcasting VP8 Video Frame from Publisher...");
-    // A sample keyframe VP8 payload (start with 0x10 indicating keyframe)
-    let video_payload = vec![0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xb4, 0x00]; 
+    // 5. Publisher sends H.264 Video Frame
+    println!("\nBroadcasting H.264 Video Frame from Publisher...");
+    let video_payload = vec![0x05, 0x04, 0x05, 0x06, 0x07, 0x08]; 
     {
         let mut r = publisher.rtc.lock().await;
         let mid = publisher.video_mid.unwrap();
-        let params = r.codec_config().find(|p| p.spec().codec == str0m::format::Codec::Vp8).unwrap().clone();
+        let params = r.codec_config().find(|p| p.spec().codec == str0m::format::Codec::H264).unwrap().clone();
         let writer = r.writer(mid).expect("Publisher must have video writer");
         let pt = writer.match_params(params).unwrap();
         writer.write(pt, Instant::now(), MediaTime::new(9000, Frequency::NINETY_KHZ), video_payload.clone()).unwrap();
@@ -684,8 +683,9 @@ async fn test_audio_and_video_forwarding_one_to_many() -> Result<(), Box<dyn std
     println!("Subscriber 2 received video frames: {}", s2_video.len());
     assert!(!s1_video.is_empty(), "Subscriber 1 did not receive forwarded video!");
     assert!(!s2_video.is_empty(), "Subscriber 2 did not receive forwarded video!");
-    assert_eq!(s1_video[0], video_payload);
-    assert_eq!(s2_video[0], video_payload);
+    let expected_annex_b = vec![0x00, 0x00, 0x00, 0x01, 0x05, 0x04, 0x05, 0x06, 0x07, 0x08];
+    assert_eq!(s1_video[0], expected_annex_b);
+    assert_eq!(s2_video[0], expected_annex_b);
     println!("✓ Phase 5 Verified: Video thumbnail frame successfully published and forwarded to 2 simultaneous subscribers!");
 
     Ok(())
