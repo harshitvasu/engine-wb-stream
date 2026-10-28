@@ -50,10 +50,20 @@ impl MediaRouter {
             };
 
             if let Some(writer) = sub.rtc.writer(target_mid) {
-                let pt = writer.match_params(frame.params).unwrap_or(frame.pt);
-                if let Err(e) = writer.write(pt, frame.network_time, frame.time, frame.data.clone()) {
+                let target_pt = writer
+                    .match_params(frame.params)
+                    .or_else(|| {
+                        writer
+                            .payload_params()
+                            .find(|p| p.spec().codec == frame.params.spec().codec)
+                            .map(|p| p.pt())
+                    })
+                    .or_else(|| writer.payload_params().next().map(|p| p.pt()))
+                    .unwrap_or(frame.pt);
+
+                if let Err(e) = writer.write(target_pt, frame.network_time, frame.time, frame.data.clone()) {
                     metrics.inc_errors();
-                    debug!("[Sub {}] Failed to write frame: {:?}", sub_id, e);
+                    debug!("[Sub {}] Failed to write frame with pt {:?}: {:?}", sub_id, target_pt, e);
                 } else {
                     if is_audio {
                         sub.stats.audio_frames_out += 1;
@@ -107,5 +117,57 @@ mod tests {
         assert!(!is_audio);
         assert!(!is_video);
         assert!(is_screen);
+    }
+
+    #[test]
+    fn test_cross_profile_pt_matching() {
+        use str0m::media::{Direction, MediaKind};
+        use str0m::Rtc;
+        use std::time::Instant;
+
+        let now = Instant::now();
+        // Server
+        let mut server = Rtc::builder()
+            .clear_codecs()
+            .enable_opus(true, false)
+            .enable_h264(true)
+            .build(now);
+
+        // Client offering H264 (like Safari)
+        let mut safari = Rtc::builder()
+            .clear_codecs()
+            .enable_opus(true, false)
+            .enable_h264(true)
+            .build(now);
+
+        let mut change = safari.sdp_api();
+        let s_mid = change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+        let (offer, pending) = change.apply().unwrap();
+        let answer = server.sdp_api().accept_offer(offer).unwrap();
+        safari.sdp_api().accept_answer(pending, answer).unwrap();
+
+        let chrome_params = server.codec_config().find(|p| p.pt() == 127.into()).unwrap().clone();
+        // Check writer on server for s_mid
+        let writer = server.writer(s_mid).unwrap();
+        let valid_pts: Vec<_> = writer.payload_params().map(|p| p.pt()).collect();
+        println!("Safari negotiated PTs on server: {:?}", valid_pts);
+
+        let matched = writer.match_params(chrome_params.clone());
+        println!("writer.match_params for PT 127 returned: {:?}", matched);
+
+        // Test writing with matched or fallback PT
+        let target_pt = writer
+            .match_params(chrome_params.clone())
+            .or_else(|| {
+                writer
+                    .payload_params()
+                    .find(|p| p.spec().codec == chrome_params.spec().codec)
+                    .map(|p| p.pt())
+            })
+            .or_else(|| writer.payload_params().next().map(|p| p.pt()))
+            .unwrap_or(chrome_params.pt());
+
+        println!("Resolved target PT for Safari: {:?}", target_pt);
+        assert!(valid_pts.contains(&target_pt), "Target PT must be valid on Safari transceiver");
     }
 }

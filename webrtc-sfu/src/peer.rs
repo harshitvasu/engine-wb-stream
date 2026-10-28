@@ -362,6 +362,39 @@ mod tests {
     }
 
     #[test]
+    fn test_chrome_offer_h264_negotiation() {
+        use str0m::media::Direction;
+        let now = Instant::now();
+        // Server: ONLY H264 and Opus enabled
+        let mut server = Rtc::builder()
+            .clear_codecs()
+            .enable_opus(true, false)
+            .enable_h264(true)
+            .build(now);
+
+        // Client (like Chrome): default codecs (VP8, VP9, H264)
+        let mut client = Rtc::builder().build(now);
+        let mut change = client.sdp_api();
+        change.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+        let v_mid = change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+        let (offer, pending) = change.apply().unwrap();
+
+        // Server accepts
+        let answer = server.sdp_api().accept_offer(offer).unwrap();
+        let answer_str = answer.to_sdp_string();
+        println!("Server Answer SDP:\n{}", answer_str);
+
+        // Client accepts answer
+        client.sdp_api().accept_answer(pending, answer).unwrap();
+
+        // Check negotiated codec on video line for server
+        let server_video = server.media(v_mid).unwrap();
+        let server_pts = server_video.remote_pts();
+        println!("Server video negotiated remote PTs: {:?}", server_pts);
+        assert!(!server_pts.is_empty(), "Server should have negotiated video PT");
+    }
+
+    #[test]
     fn test_accepts_with_unspecified_destination() {
         use str0m::media::Direction;
         use str0m::net::Receive;

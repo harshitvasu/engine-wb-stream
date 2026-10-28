@@ -22,8 +22,20 @@ function prioritizeH264(transceiver) {
     const otherCodecs = codecs.filter(
       (c) => c.mimeType && c.mimeType.toLowerCase() !== 'video/h264' && c.mimeType.toLowerCase() !== 'video/rtx'
     );
-    if (h264Codecs.length > 0) {
-      transceiver.setCodecPreferences([...h264Codecs, ...rtxCodecs, ...otherCodecs]);
+
+    // Prioritize Constrained Baseline (42e01f and 42001f with packetization-mode=1)
+    // for seamless Apple VideoToolbox (Safari/iOS) and Chrome interoperability
+    const baselineH264 = h264Codecs.filter(
+      (c) => (c.sdpFmtpLine || '').includes('42e01f') && (c.sdpFmtpLine || '').includes('packetization-mode=1')
+    );
+    const cbH264 = h264Codecs.filter(
+      (c) => (c.sdpFmtpLine || '').includes('42001f') && (c.sdpFmtpLine || '').includes('packetization-mode=1')
+    );
+    const otherH264 = h264Codecs.filter((c) => !baselineH264.includes(c) && !cbH264.includes(c));
+    const orderedH264 = [...baselineH264, ...cbH264, ...otherH264];
+
+    if (orderedH264.length > 0) {
+      transceiver.setCodecPreferences([...orderedH264, ...rtxCodecs, ...otherCodecs]);
     }
   } catch (err) {
     console.warn('[WebRTC Subscriber] prioritizeH264 error:', err);
