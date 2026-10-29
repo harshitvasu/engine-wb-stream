@@ -5,7 +5,7 @@ use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, Mid};
 use str0m::net::{Protocol, Transmit};
 use str0m::{Candidate, Event, Output, Rtc};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::dashboard::{PeerSnapshot, PeerStats};
@@ -54,6 +54,30 @@ pub struct PeerSession {
 }
 
 impl PeerSession {
+    /// Builds an Rtc instance with codecs configured in preferred order:
+    /// Opus audio first, followed by Constrained Baseline H.264 (0x42e01f) so Apple VideoToolbox
+    /// (iPad, iPhone, Safari) and Chromium browsers negotiate identical wire formats.
+    pub fn build_rtc(now: Instant) -> Rtc {
+        let mut builder = Rtc::builder()
+            .clear_codecs()
+            .enable_opus(true, false);
+
+        // 1. Constrained Baseline Profile (0x42e01f) - Universal WebRTC H.264 profile (RFC 7742)
+        // Packetization mode 1 (non-interleaved, FU-A) is primary; mode 0 is fallback
+        builder.codec_config().add_h264(108.into(), Some(109.into()), true, 0x42e01f);
+        builder.codec_config().add_h264(124.into(), Some(120.into()), false, 0x42e01f);
+        // 2. High Profile (0x64001f / 0x640c1f) - Hardware-supported by Apple & modern PCs
+        builder.codec_config().add_h264(114.into(), Some(115.into()), true, 0x64001f);
+        // 3. Baseline Profile (0x42001f)
+        builder.codec_config().add_h264(127.into(), Some(121.into()), true, 0x42001f);
+        builder.codec_config().add_h264(125.into(), Some(107.into()), false, 0x42001f);
+        // 4. Main Profile (0x4d001f)
+        builder.codec_config().add_h264(123.into(), Some(119.into()), true, 0x4d001f);
+        builder.codec_config().add_h264(35.into(), Some(36.into()), false, 0x4d001f);
+
+        builder.build(now)
+    }
+
     pub fn new(
         peer_id: String,
         room_id: String,
@@ -62,11 +86,7 @@ impl PeerSession {
         ws_sender: Option<UnboundedSender<ServerMessage>>,
     ) -> Result<Self, anyhow::Error> {
         let now = Instant::now();
-        let mut rtc = Rtc::builder()
-            .clear_codecs()
-            .enable_opus(true, false)
-            .enable_h264(true)
-            .build(now);
+        let mut rtc = Self::build_rtc(now);
 
         // 1. Always add loopback candidate (127.0.0.1:udp_port) for local browser connections on same machine
         let loopback_addr = SocketAddr::new(
@@ -121,6 +141,21 @@ impl PeerSession {
         sdp: &str,
         tracks: Option<&crate::signaling::TrackMapping>,
     ) -> Result<String, anyhow::Error> {
+        let mut offer_codecs = Vec::new();
+        for line in sdp.lines() {
+            let l = line.trim();
+            if l.starts_with("m=") || l.starts_with("a=rtpmap:") || l.starts_with("a=fmtp:") {
+                offer_codecs.push(l);
+            }
+        }
+        info!(
+            "[SFU-SDP] Peer {} ({}) Inbound Offer Codec Lines ({}):\n{}",
+            self.peer_id,
+            self.role.as_str(),
+            offer_codecs.len(),
+            offer_codecs.join("\n")
+        );
+
         let offer = SdpOffer::from_sdp_string(sdp)?;
         let answer = self.rtc.sdp_api().accept_offer(offer)?;
 
@@ -141,8 +176,33 @@ impl PeerSession {
 
         // Map audio and video MIDs from negotiated media lines using rtc.media()
         for m in &answer.media_lines {
-            if let Some(media) = self.rtc.media(m.mid()) {
-                match media.kind() {
+            let (kind, remote_pts) = if let Some(media) = self.rtc.media(m.mid()) {
+                (Some(media.kind()), media.remote_pts().to_vec())
+            } else {
+                (None, Vec::new())
+            };
+
+            if let Some(kind) = kind {
+                let writer_params: Vec<String> = self
+                    .rtc
+                    .writer(m.mid())
+                    .map(|w| {
+                        w.payload_params()
+                            .map(|p| format!("PT {}: {:?}", p.pt(), p.spec().codec))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                info!(
+                    "[SFU-SDP] Peer {} ({}) Negotiated MID {} ({:?}) | remote_pts: {:?} | writer_codecs: [{}]",
+                    self.peer_id,
+                    self.role.as_str(),
+                    m.mid(),
+                    kind,
+                    remote_pts,
+                    writer_params.join(", ")
+                );
+
+                match kind {
                     MediaKind::Audio => {
                         if self.audio_mid.is_none() {
                             self.audio_mid = Some(m.mid());
@@ -163,6 +223,21 @@ impl PeerSession {
         }
 
         let answer_sdp = answer.to_sdp_string();
+        let mut answer_codecs = Vec::new();
+        for line in answer_sdp.lines() {
+            let l = line.trim();
+            if l.starts_with("m=") || l.starts_with("a=rtpmap:") || l.starts_with("a=fmtp:") {
+                answer_codecs.push(l);
+            }
+        }
+        info!(
+            "[SFU-SDP] Peer {} ({}) Outbound Answer Codec Lines ({}):\n{}",
+            self.peer_id,
+            self.role.as_str(),
+            answer_codecs.len(),
+            answer_codecs.join("\n")
+        );
+
         Ok(answer_sdp)
     }
 
@@ -203,12 +278,23 @@ impl PeerSession {
         let req_video = kind.is_none() || kind == Some("video") || kind == Some("all");
         let req_screen = kind.is_none() || kind == Some("screen") || kind == Some("all");
 
+        info!(
+            "[SFU-Keyframe] Peer {} ({}) Keyframe requested (kind: {:?})",
+            self.peer_id,
+            self.role.as_str(),
+            kind
+        );
+
         if req_video {
             if let Some(video_mid) = self.video_mid {
                 if let Some(rx) = self.rtc.direct_api().stream_rx_by_mid(video_mid, None) {
                     rx.request_keyframe(KeyframeRequestKind::Pli);
-                    debug!("[Peer {}] Dispatched PLI keyframe request for Video MID {}", self.peer_id, video_mid);
+                    info!("[Peer {}] Dispatched PLI keyframe request for Video MID {}", self.peer_id, video_mid);
+                } else {
+                    warn!("[Peer {}] stream_rx_by_mid for Video MID {} not found", self.peer_id, video_mid);
                 }
+            } else {
+                warn!("[Peer {}] video_mid is None, cannot request video keyframe", self.peer_id);
             }
         }
 
@@ -216,8 +302,12 @@ impl PeerSession {
             if let Some(screen_mid) = self.screen_mid {
                 if let Some(rx) = self.rtc.direct_api().stream_rx_by_mid(screen_mid, None) {
                     rx.request_keyframe(KeyframeRequestKind::Pli);
-                    debug!("[Peer {}] Dispatched PLI keyframe request for Screen MID {}", self.peer_id, screen_mid);
+                    info!("[Peer {}] Dispatched PLI keyframe request for Screen MID {}", self.peer_id, screen_mid);
+                } else {
+                    warn!("[Peer {}] stream_rx_by_mid for Screen MID {} not found", self.peer_id, screen_mid);
                 }
+            } else {
+                debug!("[Peer {}] screen_mid is None, skipping screen keyframe", self.peer_id);
             }
         }
     }
@@ -365,12 +455,8 @@ mod tests {
     fn test_chrome_offer_h264_negotiation() {
         use str0m::media::Direction;
         let now = Instant::now();
-        // Server: ONLY H264 and Opus enabled
-        let mut server = Rtc::builder()
-            .clear_codecs()
-            .enable_opus(true, false)
-            .enable_h264(true)
-            .build(now);
+        // Server: ONLY H264 and Opus enabled with prioritized Constrained Baseline
+        let mut server = PeerSession::build_rtc(now);
 
         // Client (like Chrome): default codecs (VP8, VP9, H264)
         let mut client = Rtc::builder().build(now);

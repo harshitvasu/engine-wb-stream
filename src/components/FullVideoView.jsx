@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
+import { logToServer } from '../utils/remoteLogger';
 import {
   Video as VideoIcon,
   Maximize2,
@@ -50,25 +51,79 @@ export function FullVideoView({
     if (stream) {
       if (video.srcObject !== stream) {
         video.srcObject = stream;
+        logToServer('FullVideo-View', 'Attached stream to video.srcObject', {
+          isPublisher,
+          streamId: stream.id,
+          videoTracks: stream.getVideoTracks().map((t) => ({ id: t.id, readyState: t.readyState, enabled: t.enabled })),
+        });
       }
 
       const updateResolution = () => {
         if (video.videoWidth && video.videoHeight) {
           setResolutionText(`${video.videoWidth}×${video.videoHeight}`);
+          logToServer('FullVideo-View', 'video metadata loaded', {
+            isPublisher,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            readyState: video.readyState,
+          });
         }
+      };
+
+      const handleWaiting = () => {
+        logToServer('FullVideo-View', 'video waiting (buffering or starved)', {
+          isPublisher,
+          readyState: video.readyState,
+          networkState: video.networkState,
+        });
+      };
+      const handleStalled = () => {
+        logToServer('FullVideo-View', 'video stalled', {
+          isPublisher,
+          readyState: video.readyState,
+          networkState: video.networkState,
+        });
+      };
+      const handleError = () => {
+        logToServer('FullVideo-View', 'video error', {
+          isPublisher,
+          error: video.error ? { code: video.error.code, message: video.error.message } : null,
+        });
+      };
+      const handlePlaying = () => {
+        logToServer('FullVideo-View', 'video playing event', {
+          isPublisher,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+        });
       };
 
       video.addEventListener('loadedmetadata', updateResolution);
       video.addEventListener('resize', updateResolution);
+      video.addEventListener('waiting', handleWaiting);
+      video.addEventListener('stalled', handleStalled);
+      video.addEventListener('error', handleError);
+      video.addEventListener('playing', handlePlaying);
 
       video
         .play()
         .then(() => {
+          logToServer('FullVideo-View', 'video.play() SUCCESS', {
+            isPublisher,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            paused: video.paused,
+          });
           if (!isPublisher) {
             setIsAutoplayBlocked(false);
           }
         })
         .catch((err) => {
+          logToServer('FullVideo-View', 'video.play() CAUGHT ERROR', {
+            isPublisher,
+            errorName: err.name,
+            errorMessage: err.message,
+          });
           if (!isPublisher && (err.name === 'NotAllowedError' || err.name === 'AbortError')) {
             setIsAutoplayBlocked(true);
             video.muted = true;
@@ -79,6 +134,10 @@ export function FullVideoView({
       return () => {
         video.removeEventListener('loadedmetadata', updateResolution);
         video.removeEventListener('resize', updateResolution);
+        video.removeEventListener('waiting', handleWaiting);
+        video.removeEventListener('stalled', handleStalled);
+        video.removeEventListener('error', handleError);
+        video.removeEventListener('playing', handlePlaying);
       };
     } else {
       video.srcObject = null;

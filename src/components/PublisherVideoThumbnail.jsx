@@ -84,6 +84,7 @@ export function PublisherVideoThumbnail({
           isPublisher,
           videoWidth: video.videoWidth,
           videoHeight: video.videoHeight,
+          readyState: video.readyState,
         });
         const h = Math.min(video.videoWidth, video.videoHeight);
         if (h <= 240) setThumbnailResText('240p');
@@ -93,11 +94,47 @@ export function PublisherVideoThumbnail({
       }
     };
 
+    const handleWaiting = () => {
+      logToServer('Thumbnail-Video', 'video waiting (buffering or decoder starved)', {
+        isPublisher,
+        readyState: video.readyState,
+        networkState: video.networkState,
+      });
+    };
+    const handleStalled = () => {
+      logToServer('Thumbnail-Video', 'video stalled', {
+        isPublisher,
+        readyState: video.readyState,
+        networkState: video.networkState,
+      });
+    };
+    const handleError = () => {
+      logToServer('Thumbnail-Video', 'video error', {
+        isPublisher,
+        error: video.error ? { code: video.error.code, message: video.error.message } : null,
+      });
+    };
+    const handlePlaying = () => {
+      logToServer('Thumbnail-Video', 'video playing event', {
+        isPublisher,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+      });
+    };
+
     video.addEventListener('loadedmetadata', updateRes);
     video.addEventListener('resize', updateRes);
+    video.addEventListener('waiting', handleWaiting);
+    video.addEventListener('stalled', handleStalled);
+    video.addEventListener('error', handleError);
+    video.addEventListener('playing', handlePlaying);
     return () => {
       video.removeEventListener('loadedmetadata', updateRes);
       video.removeEventListener('resize', updateRes);
+      video.removeEventListener('waiting', handleWaiting);
+      video.removeEventListener('stalled', handleStalled);
+      video.removeEventListener('error', handleError);
+      video.removeEventListener('playing', handlePlaying);
     };
   }, [stream]);
 

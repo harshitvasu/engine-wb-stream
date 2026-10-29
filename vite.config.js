@@ -30,9 +30,15 @@ function clientLoggerPlugin() {
                 : '';
 
             const logLine = `[${time}] [${ua}] [${tag}] ${msg} ${details}`;
-            const colorUa = ua.includes('iPad') ? '\x1b[35m' : '\x1b[36m';
+            const colorUa = ua.includes('iPad') || ua.includes('iPhone')
+              ? '\x1b[35m' // Magenta for iOS / iPad
+              : ua.includes('Chrome')
+              ? '\x1b[33m' // Yellow for Chrome
+              : ua.includes('Safari')
+              ? '\x1b[34m' // Blue for Safari
+              : '\x1b[36m'; // Cyan for other
             console.log(
-              `\x1b[90m[${time}]\x1b[0m ${colorUa}[${ua}]\x1b[0m \x1b[33m[${tag}]\x1b[0m \x1b[1m${msg}\x1b[0m \x1b[32m${details}\x1b[0m`
+              `\x1b[90m[${time}]\x1b[0m ${colorUa}[${ua}]\x1b[0m \x1b[32m[${tag}]\x1b[0m \x1b[1m${msg}\x1b[0m ${details ? `\x1b[37m${details}\x1b[0m` : ''}`
             );
             fs.appendFileSync(path.resolve(process.cwd(), 'client_debug.log'), logLine + '\n');
           } catch {

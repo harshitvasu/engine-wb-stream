@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getSfuWebSocketUrl } from '../config/constants';
-import { logToServer } from '../utils/remoteLogger';
+import { logToServer, parseSdpCodecSummary } from '../utils/remoteLogger';
 
 /**
  * Prioritizes H.264 video codec on an RTCRtpTransceiver.
@@ -17,30 +17,53 @@ function prioritizeH264(transceiver) {
     if (!capabilities || !capabilities.codecs) return;
 
     const codecs = capabilities.codecs;
+    const allVideoSummary = codecs.map((c) => ({
+      mimeType: c.mimeType,
+      clockRate: c.clockRate,
+      sdpFmtpLine: c.sdpFmtpLine || '',
+    }));
+    logToServer('Publisher-Codec', 'Browser Video Capabilities', {
+      totalCodecs: codecs.length,
+      capabilities: allVideoSummary,
+    });
+
     const h264Codecs = codecs.filter((c) => c.mimeType && c.mimeType.toLowerCase() === 'video/h264');
 
-    // Prioritize Constrained Baseline (42e01f and 42001f with packetization-mode=1)
-    // for seamless Apple VideoToolbox (Safari/iOS) and Chrome interoperability
-    const baselineH264 = h264Codecs.filter(
+    // Apple VideoToolbox (Safari, iOS iPad/iPhone) strictly requires Constrained Baseline Profile (42e01f)
+    // with packetization-mode=1.
+    // If Chrome offers unconstrained baseline (42001f), profile mismatch and payload-type translation
+    // issues cause Apple decoders to reject the stream.
+    // By restricting transceiver codec preferences to Constrained Baseline (42e01f) and High Profile (640),
+    // Chrome and Apple devices negotiate identical H.264 formats across the board.
+    const cbMode1 = h264Codecs.filter(
       (c) => (c.sdpFmtpLine || '').includes('42e01f') && (c.sdpFmtpLine || '').includes('packetization-mode=1')
     );
-    const cbH264 = h264Codecs.filter(
-      (c) => (c.sdpFmtpLine || '').includes('42001f') && (c.sdpFmtpLine || '').includes('packetization-mode=1')
+    const cbMode0 = h264Codecs.filter(
+      (c) => (c.sdpFmtpLine || '').includes('42e01f') && (c.sdpFmtpLine || '').includes('packetization-mode=0')
     );
-    const otherH264 = h264Codecs.filter((c) => !baselineH264.includes(c) && !cbH264.includes(c));
-    const orderedH264 = [...baselineH264, ...cbH264, ...otherH264];
+    const highProfile = h264Codecs.filter(
+      (c) => (c.sdpFmtpLine || '').includes('640') && (c.sdpFmtpLine || '').includes('packetization-mode=1')
+    );
 
-    if (orderedH264.length > 0) {
+    let preferredCodecs = [];
+    if (cbMode1.length > 0 || cbMode0.length > 0) {
+      preferredCodecs = [...cbMode1, ...cbMode0, ...highProfile];
+    } else if (h264Codecs.length > 0) {
+      preferredCodecs = h264Codecs;
+    }
+
+    if (preferredCodecs.length > 0) {
       // In W3C WebRTC 1.0, passing only primary media codecs is valid and cleanly omits RTX.
       // Passing separate RTX codecs without their accompanying primary codecs causes InvalidModificationError in Chrome.
-      transceiver.setCodecPreferences(orderedH264);
-      logToServer('WebRTC-Codec', 'Prioritized H.264 codecs successfully', {
-        preferredProfile: orderedH264[0]?.sdpFmtpLine || orderedH264[0]?.mimeType,
-        totalH264Profiles: orderedH264.length,
+      transceiver.setCodecPreferences(preferredCodecs);
+      logToServer('Publisher-Codec', 'Prioritized H.264 codecs on transceiver', {
+        preferredProfile: preferredCodecs[0]?.sdpFmtpLine || preferredCodecs[0]?.mimeType,
+        totalH264Profiles: preferredCodecs.length,
+        orderedProfiles: preferredCodecs.map((c) => c.sdpFmtpLine || c.mimeType),
       });
     }
   } catch (err) {
-    logToServer('WebRTC-Codec', 'Failed to setCodecPreferences', { error: err?.message || String(err) });
+    logToServer('Publisher-Codec', 'Failed to setCodecPreferences', { error: err?.message || String(err) });
     console.warn('[WebRTC Publisher] prioritizeH264 error:', err);
   }
 }
@@ -100,6 +123,7 @@ export function useWebRTCStreamer({
 
   const reconnectTimeoutRef = useRef(null);
   const pingIntervalRef = useRef(null);
+  const statsIntervalRef = useRef(null);
   const isAcquiringMediaRef = useRef(false);
   const isCleaningUpRef = useRef(false);
 
@@ -481,15 +505,29 @@ export function useWebRTCStreamer({
           }
 
           case 'answer': {
-            const sdpLines = msg.sdp
-              ? msg.sdp.split('\r\n').filter((l) => l.startsWith('m=') || l.startsWith('a=candidate') || l.startsWith('a=rtpmap')).slice(0, 8).join(' | ')
-              : '';
-            logToServer('Publisher-SFU', 'Received SDP answer from SFU', { sdpSummary: sdpLines });
+            const parsedAnswer = parseSdpCodecSummary(msg.sdp);
+            logToServer('Publisher-SFU', 'Received SDP answer from SFU', { codecs: parsedAnswer });
             if (pcRef.current && msg.sdp) {
               console.log('[WebRTC Publisher] Received SDP answer from SFU');
               await pcRef.current.setRemoteDescription(
                 new RTCSessionDescription({ type: 'answer', sdp: msg.sdp })
               );
+              try {
+                const senders = pcRef.current.getSenders();
+                const senderDetails = senders
+                  .filter((s) => s.track?.kind === 'video')
+                  .map((s) => {
+                    const params = s.getParameters?.() || {};
+                    return {
+                      trackId: s.track?.id,
+                      codecs: params.codecs,
+                      encodings: params.encodings,
+                    };
+                  });
+                logToServer('Publisher-RTC', 'Active sender codec parameters after answer', {
+                  senders: senderDetails,
+                });
+              } catch (e) {}
             }
             break;
           }
@@ -522,6 +560,7 @@ export function useWebRTCStreamer({
       logToServer('Publisher-SFU', 'Signaling WS closed', { code: e.code, reason: e.reason });
       console.log('[WebRTC Publisher] SFU signaling WebSocket closed');
       clearInterval(pingIntervalRef.current);
+      clearInterval(statsIntervalRef.current);
       setIsRtcConnected(false);
       if (!isCleaningUpRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -615,8 +654,49 @@ export function useWebRTCStreamer({
           setIsRtcConnected(true);
           setRtcError(null);
           updateVideoEncodingParameters(activeShareModeRef.current);
+
+          // WebRTC Outbound Stats Reporter (Every 3 seconds)
+          clearInterval(statsIntervalRef.current);
+          statsIntervalRef.current = setInterval(async () => {
+            const currentPc = pcRef.current;
+            if (!currentPc || currentPc.connectionState !== 'connected') return;
+            try {
+              const stats = await currentPc.getStats();
+              const codecMap = new Map();
+              const outbounds = [];
+
+              stats.forEach((report) => {
+                if (report.type === 'codec') {
+                  codecMap.set(report.id, report);
+                } else if (report.type === 'outbound-rtp' && report.kind === 'video') {
+                  outbounds.push(report);
+                }
+              });
+
+              outbounds.forEach((ob, idx) => {
+                const codec = codecMap.get(ob.codecId);
+                logToServer('Publisher-Stats', `Outbound Video [${idx}] (${ob.mid || 'video'})`, {
+                  mid: ob.mid,
+                  mimeType: codec?.mimeType,
+                  payloadType: codec?.payloadType,
+                  sdpFmtpLine: codec?.sdpFmtpLine,
+                  bytesSent: ob.bytesSent,
+                  packetsSent: ob.packetsSent,
+                  framesEncoded: ob.framesEncoded,
+                  keyFramesEncoded: ob.keyFramesEncoded,
+                  frameWidth: ob.frameWidth,
+                  frameHeight: ob.frameHeight,
+                  fps: ob.framesPerSecond,
+                  pliCount: ob.pliCount,
+                  nackCount: ob.nackCount,
+                  qualityLimitationReason: ob.qualityLimitationReason,
+                });
+              });
+            } catch {}
+          }, 3000);
         } else if (state === 'disconnected' || state === 'failed') {
           setIsRtcConnected(false);
+          clearInterval(statsIntervalRef.current);
         }
       };
 
@@ -634,10 +714,12 @@ export function useWebRTCStreamer({
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      const parsedOffer = parseSdpCodecSummary(offer.sdp);
       logToServer('Publisher-RTC', 'SDP Offer setLocalDescription SUCCESS', {
         audioMid: audioTransceiver.mid || '0',
         videoMid: cameraTransceiver.mid || '1',
         screenMid: screenTransceiver.mid || '2',
+        offerCodecs: parsedOffer,
       });
 
       if (ws.readyState === WebSocket.OPEN) {
@@ -686,6 +768,7 @@ export function useWebRTCStreamer({
       isCleaningUpRef.current = true;
       clearTimeout(reconnectTimeoutRef.current);
       clearInterval(pingIntervalRef.current);
+      clearInterval(statsIntervalRef.current);
 
       if (rawStreamRef.current) {
         rawStreamRef.current.getTracks().forEach((t) => t.stop());

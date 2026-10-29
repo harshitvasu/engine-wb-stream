@@ -244,15 +244,28 @@ impl RoomManager {
         Err(anyhow::anyhow!("Peer not found: {}", peer_id))
     }
 
-    pub fn request_keyframe(&mut self, room_id: &str, _peer_id: &str, kind: Option<&str>) -> Vec<Transmit> {
+    pub fn request_keyframe(&mut self, room_id: &str, peer_id: &str, kind: Option<&str>) -> Vec<Transmit> {
         let mut transmits = Vec::new();
         if let Some(room) = self.rooms.get_mut(room_id) {
+            info!(
+                "[SFU-Room] Peer {} in room '{}' requested keyframe (kind: {:?})",
+                peer_id, room_id, kind
+            );
             if let Some(pub_session) = &mut room.publisher {
+                info!(
+                    "[SFU-Room] Forwarding keyframe request to publisher {} in room '{}'",
+                    pub_session.peer_id, room_id
+                );
                 pub_session.request_keyframe(kind);
                 self.metrics.inc_keyframe_requests();
                 let mut frames = Vec::new();
                 let mut kf = false;
                 pub_session.drain_outputs(&mut transmits, &mut frames, &mut kf);
+            } else {
+                tracing::warn!(
+                    "[SFU-Room] Keyframe requested by {} but NO active publisher in room '{}'",
+                    peer_id, room_id
+                );
             }
         }
         transmits
