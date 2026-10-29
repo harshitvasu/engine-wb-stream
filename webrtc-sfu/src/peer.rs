@@ -51,6 +51,8 @@ pub struct PeerSession {
     pub stats: PeerStats,
     #[allow(dead_code)]
     pub created_at: Instant,
+    pub last_video_pli: Option<Instant>,
+    pub last_screen_pli: Option<Instant>,
 }
 
 impl PeerSession {
@@ -132,6 +134,8 @@ impl PeerSession {
             remote_addr: None,
             stats: PeerStats::default(),
             created_at: now,
+            last_video_pli: None,
+            last_screen_pli: None,
         })
     }
 
@@ -272,42 +276,82 @@ impl PeerSession {
         Ok(())
     }
 
-    /// Request a video or screen keyframe (PLI) from this publisher
-    pub fn request_keyframe(&mut self, kind: Option<&str>) {
-        self.stats.keyframe_requests += 1;
+    /// Request a video or screen keyframe (PLI) from this publisher.
+    /// To prevent keyframe storms that cause Wi-Fi bufferbloat and video freezes,
+    /// requests are throttled (minimum 1.5 seconds cooldown per track), unless `force` is true
+    /// (e.g. when a new subscriber joins and needs an immediate keyframe to start decoding).
+    pub fn request_keyframe(&mut self, kind: Option<&str>, force: bool) {
+        let now = Instant::now();
+        let throttle_duration = std::time::Duration::from_millis(1500);
+
         let req_video = kind.is_none() || kind == Some("video") || kind == Some("all");
         let req_screen = kind.is_none() || kind == Some("screen") || kind == Some("all");
 
-        info!(
-            "[SFU-Keyframe] Peer {} ({}) Keyframe requested (kind: {:?})",
-            self.peer_id,
-            self.role.as_str(),
-            kind
-        );
-
         if req_video {
-            if let Some(video_mid) = self.video_mid {
-                if let Some(rx) = self.rtc.direct_api().stream_rx_by_mid(video_mid, None) {
-                    rx.request_keyframe(KeyframeRequestKind::Pli);
-                    info!("[Peer {}] Dispatched PLI keyframe request for Video MID {}", self.peer_id, video_mid);
+            let should_request = force || match self.last_video_pli {
+                Some(last) => now.duration_since(last) >= throttle_duration,
+                None => true,
+            };
+
+            if should_request {
+                if let Some(video_mid) = self.video_mid {
+                    if let Some(rx) = self.rtc.direct_api().stream_rx_by_mid(video_mid, None) {
+                        rx.request_keyframe(KeyframeRequestKind::Pli);
+                        self.last_video_pli = Some(now);
+                        self.stats.keyframe_requests += 1;
+                        info!(
+                            "[SFU-Keyframe] Peer {} ({}) Dispatched PLI for Video MID {} (force: {})",
+                            self.peer_id,
+                            self.role.as_str(),
+                            video_mid,
+                            force
+                        );
+                    } else {
+                        warn!("[Peer {}] stream_rx_by_mid for Video MID {} not found", self.peer_id, video_mid);
+                    }
                 } else {
-                    warn!("[Peer {}] stream_rx_by_mid for Video MID {} not found", self.peer_id, video_mid);
+                    warn!("[Peer {}] video_mid is None, cannot request video keyframe", self.peer_id);
                 }
             } else {
-                warn!("[Peer {}] video_mid is None, cannot request video keyframe", self.peer_id);
+                debug!(
+                    "[SFU-Keyframe] Peer {} Throttled duplicate Video PLI (last requested {:?} ago)",
+                    self.peer_id,
+                    self.last_video_pli.map(|t| now.duration_since(t))
+                );
             }
         }
 
         if req_screen {
-            if let Some(screen_mid) = self.screen_mid {
-                if let Some(rx) = self.rtc.direct_api().stream_rx_by_mid(screen_mid, None) {
-                    rx.request_keyframe(KeyframeRequestKind::Pli);
-                    info!("[Peer {}] Dispatched PLI keyframe request for Screen MID {}", self.peer_id, screen_mid);
+            let should_request = force || match self.last_screen_pli {
+                Some(last) => now.duration_since(last) >= throttle_duration,
+                None => true,
+            };
+
+            if should_request {
+                if let Some(screen_mid) = self.screen_mid {
+                    if let Some(rx) = self.rtc.direct_api().stream_rx_by_mid(screen_mid, None) {
+                        rx.request_keyframe(KeyframeRequestKind::Pli);
+                        self.last_screen_pli = Some(now);
+                        self.stats.keyframe_requests += 1;
+                        info!(
+                            "[SFU-Keyframe] Peer {} ({}) Dispatched PLI for Screen MID {} (force: {})",
+                            self.peer_id,
+                            self.role.as_str(),
+                            screen_mid,
+                            force
+                        );
+                    } else {
+                        warn!("[Peer {}] stream_rx_by_mid for Screen MID {} not found", self.peer_id, screen_mid);
+                    }
                 } else {
-                    warn!("[Peer {}] stream_rx_by_mid for Screen MID {} not found", self.peer_id, screen_mid);
+                    debug!("[Peer {}] screen_mid is None, skipping screen keyframe", self.peer_id);
                 }
             } else {
-                debug!("[Peer {}] screen_mid is None, skipping screen keyframe", self.peer_id);
+                debug!(
+                    "[SFU-Keyframe] Peer {} Throttled duplicate Screen PLI (last requested {:?} ago)",
+                    self.peer_id,
+                    self.last_screen_pli.map(|t| now.duration_since(t))
+                );
             }
         }
     }
@@ -587,5 +631,31 @@ mod tests {
 
         assert!(client_connected, "Client should be connected");
         assert!(server_connected, "Server should be connected");
+    }
+
+    #[test]
+    fn test_pli_throttling_prevents_keyframe_storm() {
+        let config = Config::from_env();
+        let mut session = PeerSession::new(
+            "pub-test".to_string(),
+            "room-test".to_string(),
+            Role::Publisher,
+            &config,
+            None,
+        ).unwrap();
+
+        assert!(session.last_video_pli.is_none());
+        assert_eq!(session.stats.keyframe_requests, 0);
+
+        let t1 = Instant::now();
+        session.last_video_pli = Some(t1);
+
+        let now = Instant::now();
+        let throttle_duration = std::time::Duration::from_millis(1500);
+        let is_throttled = match session.last_video_pli {
+            Some(last) => now.duration_since(last) < throttle_duration,
+            None => false,
+        };
+        assert!(is_throttled, "Requests within 1.5s cooldown must be throttled");
     }
 }

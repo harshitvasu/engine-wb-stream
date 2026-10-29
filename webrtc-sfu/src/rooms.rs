@@ -139,7 +139,7 @@ impl RoomManager {
 
                 // If publisher exists, notify subscriber and request an immediate keyframe
                 if let Some(pub_session) = &mut room.publisher {
-                    pub_session.request_keyframe(None);
+                    pub_session.request_keyframe(None, true);
                     self.metrics.inc_keyframe_requests();
                     let scr_active = room.screen_sharing_active;
                     if let Some(sub) = room.subscribers.get(&peer_id) {
@@ -191,7 +191,7 @@ impl RoomManager {
                 let answer = sub_session.handle_offer(sdp, tracks)?;
                 sub_session.drain_outputs(&mut transmits, &mut frames, &mut keyframe_requested);
                 // Also trigger keyframe on publisher for the new subscriber and drain transmits
-                pub_session.request_keyframe(None);
+                pub_session.request_keyframe(None, true);
                 let mut pub_frames = Vec::new();
                 let mut pub_kf = false;
                 pub_session.drain_outputs(&mut transmits, &mut pub_frames, &mut pub_kf);
@@ -256,7 +256,7 @@ impl RoomManager {
                     "[SFU-Room] Forwarding keyframe request to publisher {} in room '{}'",
                     pub_session.peer_id, room_id
                 );
-                pub_session.request_keyframe(kind);
+                pub_session.request_keyframe(kind, false);
                 self.metrics.inc_keyframe_requests();
                 let mut frames = Vec::new();
                 let mut kf = false;
@@ -425,7 +425,7 @@ impl RoomManager {
 
                         if keyframe_requested {
                             if let Some(pub_session) = &mut room.publisher {
-                                pub_session.request_keyframe(None);
+                                pub_session.request_keyframe(None, false);
                                 self.metrics.inc_keyframe_requests();
                                 let mut pub_frames = Vec::new();
                                 let mut pub_kf = false;
@@ -479,7 +479,7 @@ impl RoomManager {
                     sub_session.drain_outputs(transmits, &mut dummy_frames, &mut keyframe_requested);
                     if keyframe_requested {
                         if let Some(pub_session) = &mut room.publisher {
-                            pub_session.request_keyframe(None);
+                            pub_session.request_keyframe(None, false);
                             self.metrics.inc_keyframe_requests();
                             let mut pub_frames = Vec::new();
                             let mut pub_kf = false;

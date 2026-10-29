@@ -128,7 +128,7 @@ export function useWebRTCStreamer({
   const isCleaningUpRef = useRef(false);
 
   // Dynamically update WebRTC video encoding bitrate:
-  // - In 'video' mode: full 720p HD @ 2.2 Mbps
+  // - In 'video' mode: full 720p HD @ 1.2 Mbps (right-sized for half-duplex Wi-Fi to prevent bufferbloat)
   // - In non-video mode (whiteboard or screen): throttle bitrate to ~300 kbps for thumbnail (saves bandwidth)
   const updateVideoEncodingParameters = useCallback(async (mode) => {
     const sender = videoSenderRef.current;
@@ -139,7 +139,7 @@ export function useWebRTCStreamer({
       if (!params || !params.encodings || params.encodings.length === 0) return;
 
       if (mode === 'video') {
-        params.encodings[0].maxBitrate = 2200000; // 2.2 Mbps
+        params.encodings[0].maxBitrate = 1200000; // 1.2 Mbps (Right-sized for low-latency Wi-Fi & smooth decoding)
         params.encodings[0].maxFramerate = 30;
       } else {
         params.encodings[0].maxBitrate = 300000; // 300 kbps

@@ -143,7 +143,7 @@ function getEncodingConfigForMode(mode) {
   if (mode === 'video') {
     return {
       scaleResolutionDownBy: 1.0,
-      maxBitrate: 2200000,
+      maxBitrate: 1200000,
       maxFramerate: 30,
       targetRes: '720p',
     };
@@ -166,7 +166,7 @@ assert.strictEqual(screenEnc.maxBitrate, 200000);
 
 const videoEnc = getEncodingConfigForMode('video');
 assert.strictEqual(videoEnc.scaleResolutionDownBy, 1.0, 'Video mode must broadcast at full 1.0 scale (720p HD)');
-assert.strictEqual(videoEnc.maxBitrate, 2200000, 'Video mode must allocate 2.2Mbps for high definition streaming');
+assert.strictEqual(videoEnc.maxBitrate, 1200000, 'Video mode must allocate 1.2Mbps for high definition streaming');
 console.log('✓ Dynamic encoding parameters verify 720p HD for video mode and 360p @ 200kbps for thumbnail mode');
 
 // -----------------------------------------------------------------------------
